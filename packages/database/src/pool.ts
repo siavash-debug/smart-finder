@@ -14,6 +14,14 @@ const { Pool, types } = pg;
 export type DatabasePool = pg.Pool;
 export type DatabaseClient = pg.PoolClient;
 
+/**
+ * The minimal surface a repository function needs. Both `Pool` and `PoolClient` satisfy it,
+ * so every repository and queue function in this package accepts either — a plain pool for
+ * an isolated call, or a client obtained from `withTransaction` to compose several calls into
+ * one transaction. Tests use the same seam to wrap each test in a rolled-back transaction.
+ */
+export type Queryable = Pick<pg.Pool, "query">;
+
 const PG_OID_INT8 = 20;
 const PG_OID_NUMERIC = 1700;
 

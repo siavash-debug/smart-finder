@@ -2,16 +2,23 @@
  * Worker entry point — the ingest plane (ARCHITECTURE §5).
  *
  * A long-running process, not a request handler: it owns its own lifetime and must survive
- * transient dependency failures rather than exiting. Phase 0 wires the skeleton — env, pool,
- * health server, poll loop, graceful shutdown. The job handlers arrive in Phase 1.
+ * transient dependency failures rather than exiting. Phase 0 wired the skeleton; Phase 1 wires
+ * the poll loop to the real `job` table via `createJobPollTick`.
+ *
+ * The handler registry is empty — no job producer exists yet (the collector arrives in
+ * Phase 5). A claimed job with no matching handler fails loudly rather than being silently
+ * dropped; see `job-dispatcher.ts`.
  */
 
 import { checkDatabaseHealth, closePool, createPool } from "@smart-finder/database";
 import { createLogger, loadWorkerEnv, type ComponentHealth } from "@smart-finder/shared";
 
 import { startHealthServer } from "./health-server.js";
-import { runPollLoop, type PollLoopTickResult } from "./poll-loop.js";
+import { createJobPollTick, type JobHandlerRegistry } from "./job-dispatcher.js";
+import { runPollLoop } from "./poll-loop.js";
 import { WORKER_VERSION } from "./version.js";
+
+const JOB_HANDLERS: JobHandlerRegistry = {};
 
 async function main(): Promise<void> {
   const env = loadWorkerEnv();
@@ -41,9 +48,13 @@ async function main(): Promise<void> {
   const shutdown = new AbortController();
   installSignalHandlers(shutdown, logger, env.WORKER_SHUTDOWN_TIMEOUT_MS);
 
-  // Phase 0 has no job table yet, so the tick is deliberately idle. Replacing this with the
-  // `FOR UPDATE SKIP LOCKED` claim is the first task of Phase 1.
-  const tick = (): Promise<PollLoopTickResult> => Promise.resolve({ didWork: false });
+  const tick = createJobPollTick({
+    pool,
+    handlers: JOB_HANDLERS,
+    batchSize: env.WORKER_JOB_BATCH_SIZE,
+    workerId: `worker-${process.pid.toString()}`,
+    logger,
+  });
 
   try {
     await runPollLoop({

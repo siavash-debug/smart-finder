@@ -31,22 +31,36 @@ mid-build and Docker's storage went read-only. Environmental, not a Dockerfile d
 builds natively. Re-run `docker build -f infrastructure/docker/Dockerfile.web .` once disk is
 free. Tracked in `PROJECT_CONTEXT.md`.
 
-## Phase 1 — Core domain ⬜
+## Phase 1 — Core domain 🔄
 
 Database schema and typed data access.
 
-- ⬜ Migration for the full core schema: `user`, `auth_session`, `geo_area`,
-  `source_area_alias`, `source`, `collection_run`, `posting`, `posting_version`, `property`,
-  `search_profile`, `search_profile_history`, `match`, `user_listing_action`, `notification`,
-  `job`, `audit_log`, `llm_call`
-- ⬜ Extensions: `pgcrypto`, `pg_trgm`, `postgis`
-- ⬜ Indexes for match fan-out and dedup candidate lookup
-- ⬜ Repository layer per aggregate, every user-scoped query filtered by `user_id`
-- ⬜ Job queue implementation: claim with `FOR UPDATE SKIP LOCKED`, retry, backoff
-- ⬜ Integration tests against a real Postgres container
+- ✅ Migration `0002_core_schema` for the full core schema: `app_user` (`user` is a reserved
+  keyword — ARCHITECTURE §1), `auth_session`, `geo_area`, `source_area_alias`, `source`,
+  `collection_run`, `posting`, `posting_version`, `property`, `duplicate_candidate` (implements
+  §28's uncertain-pair requirement), `search_profile`, `search_profile_history`, `match`,
+  `user_listing_action`, `notification`, `job`, `audit_log`, `llm_call`
+- ✅ Extensions: `pgcrypto`, `pg_trgm`, `postgis` (migration `0001`, already applied)
+- ✅ Indexes for match fan-out and dedup candidate lookup
+- ✅ Repository layer for `app_user`, `search_profile`, and the `job` queue — every
+  `search_profile` query filtered by `user_id`. Repositories for the remaining aggregates are
+  deferred to the phase that first consumes them (ADR-0011), same reasoning as ADR-0008.
+- ✅ Job queue implementation: `claimJobs` (`FOR UPDATE SKIP LOCKED`), `completeJob`,
+  `failJob` with full-jitter exponential backoff, wired into the worker's poll loop via
+  `job-dispatcher.ts`
+- 🔄 Integration tests against a real Postgres container — **written, not yet run**. See the
+  outstanding item below.
 
 **Exit criteria:** migrations apply from empty, repositories covered by tests, IDOR-scoping
 asserted in tests.
+
+**Outstanding:** the host's Docker Desktop instance is down (a consequence of the disk-full
+event from Phase 0 — see `PROJECT_CONTEXT.md`), so the 25 integration tests in
+`packages/database/src/*.integration.test.ts` — including the IDOR-scoping tests this phase's
+exit criteria require — have not been executed against a live database in this session. They
+are written to self-skip (not fail) when no database is reachable, which is what
+`npm run verify` currently shows. Run `npm run db:up && npm run db:migrate && npm test` once
+Docker is back to get a real pass/fail.
 
 ## Phase 2 — Persian engine ⬜
 

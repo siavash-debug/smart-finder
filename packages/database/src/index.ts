@@ -15,6 +15,46 @@ export {
   type CreatePoolOptions,
   type DatabaseClient,
   type DatabasePool,
+  type Queryable,
 } from "./pool.js";
 
 export { checkDatabaseHealth } from "./health.js";
+
+export type {
+  AppUserRow,
+  JobRow,
+  JobStatus,
+  PropertyType,
+  SearchProfileRow,
+  TransactionType,
+} from "./domain.js";
+
+export {
+  claimJobs,
+  completeJob,
+  computeBackoffMs,
+  countJobsByStatus,
+  enqueueJob,
+  failJob,
+  getJobById,
+  type ClaimJobsInput,
+  type EnqueueJobInput,
+  type FailJobInput,
+} from "./job-queue.js";
+
+export {
+  createUser,
+  findOrCreateUserByTelegramId,
+  findUserById,
+  findUserByTelegramId,
+  type CreateUserInput,
+} from "./user-repository.js";
+
+export {
+  deactivateSearchProfile,
+  getActiveSearchProfile,
+  getSearchProfileById,
+  listSearchProfileHistory,
+  replaceActiveSearchProfile,
+  type SearchProfileInput,
+} from "./search-profile-repository.js";

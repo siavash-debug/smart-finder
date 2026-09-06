@@ -173,3 +173,35 @@ without explicit user approval (see MASTER_PROMPT §43).
 - **Alternatives:** One `/healthz` that checks everything — causes restart storms.
 - **Consequences:** Two endpoints to document. Deployment probes must be wired to the right
   one. This extends §27 rather than contradicting it.
+
+---
+
+## ADR-0011 — Repositories are built when their consumer arrives, not all at once
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** Migration `0002_core_schema` creates all eighteen tables from MASTER_PROMPT §8
+  in one pass, because they are interlinked by foreign keys and have to exist together. The
+  roadmap's Phase 1 item "repository layer per aggregate" could be read as requiring a
+  repository module for all eighteen immediately. Most of them have no caller yet: `posting`
+  and `property` are written by the Phase 5 collector and read by Phase 3 matching; `match` is
+  written by Phase 3; `notification` by Phase 4; `duplicate_candidate` by Phase 6; `audit_log`
+  and `llm_call` by whichever privileged operation or AI call first needs them.
+- **Decision:** Phase 1 ships repositories for `app_user`, `search_profile`, and the `job`
+  queue — the three with an actual consumer right now (the worker's poll loop, and the
+  explicit IDOR-scoping requirement). Every other table's repository is written by the phase
+  that first reads or writes it, same reasoning as ADR-0008 for package scaffolding.
+- **Reason:** MASTER_PROMPT §2 and §38 rule out speculative code with no caller. A repository
+  written now for a table nothing touches until Phase 5 would be exercised by nothing but its
+  own tests, and its shape would likely be wrong once the collector's actual access patterns
+  are known.
+- **Alternatives:** Write all eighteen now — rejected as speculative, untestable-by-use code.
+  Write none until a repository is strictly required — rejected because the job queue is a
+  concrete Phase 1 deliverable the worker needs immediately.
+- **Consequences:** `packages/database`'s public surface grows incrementally across phases
+  rather than all at once. `ROADMAP.md` and `PROJECT_CONTEXT.md` track which repositories
+  exist versus which tables merely have a schema.
+- **Related:** every repository function takes a `Queryable` (`Pick<pg.Pool, "query">`)
+  rather than a concrete `Pool`, so it can run against a plain pool or against a client already
+  inside a transaction (see `pool.ts`). `replaceActiveSearchProfile` is the one exception — it
+  opens its own transaction internally and so needs a real `Pool`, not a `Queryable`.

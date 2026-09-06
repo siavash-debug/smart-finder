@@ -3,7 +3,7 @@
  */
 
 import type { ComponentHealth } from "@smart-finder/shared";
-import type { DatabasePool } from "./pool.js";
+import type { Queryable } from "./pool.js";
 
 /** Above this, the database is reachable but slow enough to be worth surfacing. */
 const DEGRADED_LATENCY_MS = 500;
@@ -14,7 +14,7 @@ const DEGRADED_LATENCY_MS = 500;
  * and sometimes the user from the connection string.
  */
 export async function checkDatabaseHealth(
-  pool: DatabasePool,
+  pool: Queryable,
   options: { timeoutMs?: number } = {},
 ): Promise<ComponentHealth> {
   const timeoutMs = options.timeoutMs ?? 2_000;
