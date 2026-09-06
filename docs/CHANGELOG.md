@@ -4,7 +4,35 @@ Meaningful implementation changes, newest first. Dates are UTC.
 
 ---
 
-## 2026-09-07 — Phase 1: core domain (code complete; DB verification pending)
+## 2026-09-07 — Phase 1 verification: live database
+
+Docker Desktop and the host disk-space issue (see the "Known gap" in the entry below) are
+resolved. Re-ran verification against a real PostgreSQL instance rather than the self-skipped
+integration suite:
+
+- `docker info` succeeds; `npm run db:up` → `smart-finder-postgres-1` reaches
+  `Status: running  Health: healthy`; `pg_isready` confirms it accepts connections.
+- `npm run db:migrate` applies `0002_core_schema` (692ms). Re-running is a no-op (0 applied, 2
+  skipped) — idempotency holds.
+- Schema inspection confirms: 18 domain tables (plus `schema_migration` and PostGIS's
+  `spatial_ref_sys`), extensions `pgcrypto`/`pg_trgm`/`postgis` (+ dependents) installed, 63
+  indexes, 8 `updated_at` triggers, and the `search_profile` one-active-per-user partial
+  unique index — all confirmed via `psql`.
+- `npx vitest run`: **82 tests, 82 passed, 0 skipped.** The 25 tests that previously
+  self-skipped now run for real, verbosely confirmed one by one, including:
+  - `claimJobs` under genuine concurrency — two simultaneous claims for one job, `SKIP LOCKED`
+    gives it to exactly one;
+  - retry-then-reclaim and terminal-failure backoff behavior;
+  - the one-active-profile-per-user replace/history flow;
+  - all three IDOR-scoping tests (`getSearchProfileById`, `deactivateSearchProfile`,
+    `listSearchProfileHistory` each return nothing to a non-owning user).
+- `npm run verify` passes in full: format, lint, typecheck, 82/82 tests, build.
+
+**Phase 1 is now verified-complete**, not merely code-complete. No schema or code changes were
+made to reach this result — the code from the entry below was correct as written; only its
+verification was previously blocked.
+
+## 2026-09-07 — Phase 1: core domain (code complete; DB verification pending at the time)
 
 ### Schema
 

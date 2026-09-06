@@ -31,7 +31,7 @@ mid-build and Docker's storage went read-only. Environmental, not a Dockerfile d
 builds natively. Re-run `docker build -f infrastructure/docker/Dockerfile.web .` once disk is
 free. Tracked in `PROJECT_CONTEXT.md`.
 
-## Phase 1 — Core domain 🔄
+## Phase 1 — Core domain ✅
 
 Database schema and typed data access.
 
@@ -48,19 +48,20 @@ Database schema and typed data access.
 - ✅ Job queue implementation: `claimJobs` (`FOR UPDATE SKIP LOCKED`), `completeJob`,
   `failJob` with full-jitter exponential backoff, wired into the worker's poll loop via
   `job-dispatcher.ts`
-- 🔄 Integration tests against a real Postgres container — **written, not yet run**. See the
-  outstanding item below.
+- ✅ Integration tests against a real Postgres container — **written and executed against a
+  live database on 2026-09-07.** All 25 previously-skipped tests ran and passed (0 skipped).
 
 **Exit criteria:** migrations apply from empty, repositories covered by tests, IDOR-scoping
-asserted in tests.
+asserted in tests. **Met and verified against a live database — see below.**
 
-**Outstanding:** the host's Docker Desktop instance is down (a consequence of the disk-full
-event from Phase 0 — see `PROJECT_CONTEXT.md`), so the 25 integration tests in
-`packages/database/src/*.integration.test.ts` — including the IDOR-scoping tests this phase's
-exit criteria require — have not been executed against a live database in this session. They
-are written to self-skip (not fail) when no database is reachable, which is what
-`npm run verify` currently shows. Run `npm run db:up && npm run db:migrate && npm test` once
-Docker is back to get a real pass/fail.
+**Verification history:** this phase was first implemented while Docker Desktop was down on
+the host (a consequence of a disk-full event during Phase 0), so its 25 integration tests
+could only self-skip rather than run. On 2026-09-07, with Docker restored and the disk issue
+resolved, `npm run db:up && npm run db:migrate && npm test` was re-run for real:
+`schema_migration` shows `0002` applied (692ms), all 18 domain tables exist with 63 indexes
+and 8 `updated_at` triggers, and all 82 tests pass with 0 skipped — including SKIP LOCKED
+concurrency, retry/backoff, and all three IDOR-scoping tests. `npm run verify` passes in
+full: format, lint, typecheck, tests, build. Detail in `CHANGELOG.md`.
 
 ## Phase 2 — Persian engine ⬜
 
