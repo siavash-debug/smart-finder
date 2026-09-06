@@ -1,0 +1,106 @@
+/**
+ * Worker entry point — the ingest plane (ARCHITECTURE §5).
+ *
+ * A long-running process, not a request handler: it owns its own lifetime and must survive
+ * transient dependency failures rather than exiting. Phase 0 wires the skeleton — env, pool,
+ * health server, poll loop, graceful shutdown. The job handlers arrive in Phase 1.
+ */
+
+import { checkDatabaseHealth, closePool, createPool } from "@smart-finder/database";
+import { createLogger, loadWorkerEnv, type ComponentHealth } from "@smart-finder/shared";
+
+import { startHealthServer } from "./health-server.js";
+import { runPollLoop, type PollLoopTickResult } from "./poll-loop.js";
+import { WORKER_VERSION } from "./version.js";
+
+async function main(): Promise<void> {
+  const env = loadWorkerEnv();
+  const logger = createLogger({
+    level: env.LOG_LEVEL,
+    base: { service: "worker", version: WORKER_VERSION },
+  });
+
+  logger.info("worker starting", {
+    status: "starting",
+    node_env: env.NODE_ENV,
+    poll_interval_ms: env.WORKER_POLL_INTERVAL_MS,
+    job_batch_size: env.WORKER_JOB_BATCH_SIZE,
+  });
+
+  const pool = createPool({ env, logger, applicationName: "smart-finder-worker" });
+
+  const probes = async (): Promise<ComponentHealth[]> => [await checkDatabaseHealth(pool)];
+
+  const health = await startHealthServer({
+    port: env.WORKER_HEALTH_PORT,
+    version: WORKER_VERSION,
+    logger,
+    probes,
+  });
+
+  const shutdown = new AbortController();
+  installSignalHandlers(shutdown, logger, env.WORKER_SHUTDOWN_TIMEOUT_MS);
+
+  // Phase 0 has no job table yet, so the tick is deliberately idle. Replacing this with the
+  // `FOR UPDATE SKIP LOCKED` claim is the first task of Phase 1.
+  const tick = (): Promise<PollLoopTickResult> => Promise.resolve({ didWork: false });
+
+  try {
+    await runPollLoop({
+      intervalMs: env.WORKER_POLL_INTERVAL_MS,
+      tick,
+      signal: shutdown.signal,
+      logger,
+    });
+  } finally {
+    logger.info("worker shutting down", { status: "stopping" });
+    await health.close().catch((error: unknown) => {
+      logger.error("health server close failed", { err: error, error_type: "shutdown_error" });
+    });
+    await closePool(pool).catch((error: unknown) => {
+      logger.error("pool close failed", { err: error, error_type: "shutdown_error" });
+    });
+    logger.info("worker stopped", { status: "stopped" });
+  }
+}
+
+/**
+ * First signal starts a graceful drain. A second signal, or the expiry of the grace period,
+ * exits immediately — an orchestrator that has already sent SIGTERM will SIGKILL soon anyway,
+ * and hanging until then only delays the restart.
+ */
+function installSignalHandlers(
+  controller: AbortController,
+  logger: ReturnType<typeof createLogger>,
+  timeoutMs: number,
+): void {
+  let shuttingDown = false;
+
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (shuttingDown) {
+      logger.warn("second signal received, exiting immediately", { signal });
+      process.exit(1);
+    }
+    shuttingDown = true;
+    logger.info("shutdown signal received", { signal, status: "draining", timeout_ms: timeoutMs });
+    controller.abort();
+
+    const forceExit = setTimeout(() => {
+      logger.error("graceful shutdown timed out, forcing exit", {
+        error_type: "shutdown_timeout",
+      });
+      process.exit(1);
+    }, timeoutMs);
+    forceExit.unref();
+  };
+
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+}
+
+main().catch((error: unknown) => {
+  // Startup failures (bad env, unreachable database at boot) are fatal and must be loud.
+  const logger = createLogger({ level: "error", base: { service: "worker" } });
+  logger.fatal("worker failed to start", { err: error, error_type: "startup_failed" });
+  process.exitCode = 1;
+});

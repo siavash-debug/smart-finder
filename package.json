@@ -1,0 +1,48 @@
+{
+  "name": "smart-finder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Persian-language real-estate discovery and alert platform (Tehran)",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:packages": "tsc --build packages/shared/tsconfig.build.json packages/database/tsconfig.build.json apps/worker/tsconfig.build.json",
+    "watch:packages": "tsc --build packages/shared/tsconfig.build.json packages/database/tsconfig.build.json --watch",
+    "build": "npm run build:packages && npm run build --workspace @smart-finder/web",
+    "typecheck": "npm run build:packages && npm run typecheck --workspaces --if-present",
+    "clean": "tsc --build --clean packages/shared/tsconfig.build.json packages/database/tsconfig.build.json apps/worker/tsconfig.build.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build",
+    "dev:web": "npm run dev --workspace @smart-finder/web",
+    "dev:worker": "node --env-file-if-exists=.env --import tsx --watch apps/worker/src/index.ts",
+    "db:migrate": "node --env-file-if-exists=.env --import tsx packages/database/src/cli/migrate.ts",
+    "db:up": "docker compose -f infrastructure/docker/docker-compose.yml up -d postgres",
+    "db:down": "docker compose -f infrastructure/docker/docker-compose.yml down",
+    "db:logs": "docker compose -f infrastructure/docker/docker-compose.yml logs -f postgres"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "^5.0.0",
+    "eslint": "^10.10.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.69.0",
+    "vitest": "^5.0.0"
+  }
+}

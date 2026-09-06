@@ -1,0 +1,21 @@
+{
+  "name": "@smart-finder/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc --build tsconfig.build.json",
+    "clean": "tsc --build tsconfig.build.json --clean",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@smart-finder/database": "*",
+    "@smart-finder/shared": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13"
+  }
+}

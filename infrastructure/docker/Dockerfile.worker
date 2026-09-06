@@ -1,0 +1,50 @@
+# Worker image — the ingest plane.
+# Build context is the repository root: docker build -f infrastructure/docker/Dockerfile.worker .
+
+FROM node:24-alpine AS base
+WORKDIR /app
+# Signals reach PID 1 correctly through tini, so SIGTERM triggers the graceful drain in
+# apps/worker/src/index.ts instead of an abrupt kill.
+RUN apk add --no-cache tini
+
+# ── dependencies ─────────────────────────────────────────────────────────────
+# Only the manifests are copied first so this layer caches until a dependency changes.
+FROM base AS deps
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/database/package.json ./packages/database/
+COPY apps/worker/package.json ./apps/worker/
+RUN npm ci
+
+# ── build ────────────────────────────────────────────────────────────────────
+FROM deps AS build
+COPY tsconfig.base.json tsconfig.json ./
+COPY packages/shared ./packages/shared
+COPY packages/database ./packages/database
+COPY apps/worker ./apps/worker
+RUN npm run build:packages
+
+# ── runtime ──────────────────────────────────────────────────────────────────
+FROM base AS runtime
+ENV NODE_ENV=production
+
+COPY package.json package-lock.json ./
+COPY packages/shared/package.json ./packages/shared/
+COPY packages/database/package.json ./packages/database/
+COPY apps/worker/package.json ./apps/worker/
+RUN npm ci --omit=dev && npm cache clean --force
+
+COPY --from=build /app/packages/shared/dist ./packages/shared/dist
+COPY --from=build /app/packages/database/dist ./packages/database/dist
+# Migration SQL is read from disk at runtime by the migrate CLI.
+COPY packages/database/migrations ./packages/database/migrations
+COPY --from=build /app/apps/worker/dist ./apps/worker/dist
+
+USER node
+EXPOSE 3001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.WORKER_HEALTH_PORT||3001)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "apps/worker/dist/index.js"]

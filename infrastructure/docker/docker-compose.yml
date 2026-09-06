@@ -1,0 +1,69 @@
+# Local development stack.
+#
+# `npm run db:up` starts only Postgres, which is all that is needed to develop against.
+# The `web` and `worker` services exist so the container images can be built and smoke-tested
+# locally the same way they are deployed; start them with `--profile apps`.
+
+name: smart-finder
+
+services:
+  postgres:
+    # PostGIS variant of the official Postgres 16 image. The postgis extension is optional at
+    # migration time (see migrations/0001_extensions.sql), but having it locally means the
+    # geography code paths are exercised in development.
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: smartfinder
+      POSTGRES_PASSWORD: smartfinder
+      POSTGRES_DB: smartfinder
+      # Deterministic collation regardless of the host locale, so ORDER BY on Persian text
+      # behaves identically for every developer.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smartfinder -d smartfinder"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  web:
+    profiles: ["apps"]
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: postgresql://smartfinder:smartfinder@postgres:5432/smartfinder
+      APP_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    profiles: ["apps"]
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://smartfinder:smartfinder@postgres:5432/smartfinder
+      WORKER_HEALTH_PORT: "3001"
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

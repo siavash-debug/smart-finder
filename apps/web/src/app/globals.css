@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens. Vazirmatn is self-hosted via the @fontsource-variable package imported in
+ * layout.tsx — no third-party font CDN (MASTER_PROMPT §17).
+ */
+@theme {
+  --font-sans:
+    "Vazirmatn Variable", "Vazirmatn", ui-sans-serif, system-ui, "Segoe UI", Tahoma, sans-serif;
+
+  --color-surface: oklch(0.99 0 0);
+  --color-surface-muted: oklch(0.968 0.003 250);
+  --color-ink: oklch(0.21 0.02 260);
+  --color-ink-muted: oklch(0.52 0.02 260);
+  --color-line: oklch(0.9 0.005 260);
+  --color-brand: oklch(0.55 0.14 250);
+}
+
+/* `@theme` must be top-level, so the dark palette overrides the generated custom properties. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-surface: oklch(0.18 0.01 260);
+    --color-surface-muted: oklch(0.23 0.012 260);
+    --color-ink: oklch(0.96 0.005 260);
+    --color-ink-muted: oklch(0.72 0.015 260);
+    --color-line: oklch(0.32 0.012 260);
+    --color-brand: oklch(0.72 0.12 250);
+  }
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  /* Persian numerals read better with the font's own figures than with tabular defaults. */
+  font-variant-numeric: normal;
+}
+
+/* Visible focus is a baseline accessibility requirement, not a polish item. */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
