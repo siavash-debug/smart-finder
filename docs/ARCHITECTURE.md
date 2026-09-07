@@ -71,6 +71,12 @@ Fan-out direction is **listing → candidate profiles**, never profile → all l
 (MASTER_PROMPT §12). Candidate profiles are selected with indexed SQL predicates, then scored
 in memory by the pure matching library.
 
+**Implementation status (2026-09-07):** Phase 5 implements Collector→Parser→Normalizer through
+persistence (`posting`/`posting_version`, via `upsertPosting`) for one source, Divar. The
+worker's `collect_divar` job type is the entry point — invoked with an explicit payload, not
+scheduled by a cron yet. Deduplication, property resolution, and match fan-out remain
+unimplemented (Phase 6+); nothing downstream of `posting_version` exists yet.
+
 ## 3. Repository layout
 
 ```
@@ -86,7 +92,8 @@ smart-finder/
 │   ├── matching/            pure deterministic scoring — score(listing, profile), zero deps
 │   ├── telegram/            bot client, webhook-secret verification, command parsing,
 │   │                        Persian message templates, rate-limit + quiet-hours logic
-│   ├── scraper/             (Phase 5) SourceAdapter interface + per-source adapters
+│   ├── scraper/             Phase 5: SourceAdapter interface + DivarAdapter (Playwright,
+│   │                        isolated here only — ADR-0016)
 │   └── ai/                  (Phase 7) provider abstraction, schema-constrained extraction
 ├── infrastructure/docker/   Dockerfiles, compose, Postgres init
 └── docs/                    project memory (this directory)
@@ -108,8 +115,14 @@ apps/worker┘                              ▲
 `packages/normalizer` has no dependency on `database`, `shared`, or any other package — it is
 pure, deterministic, and has no AI dependency (ADR-0012). `packages/normalizer` is used by
 `apps/web`'s webhook handler as of Phase 4, for the deterministic preference-extraction
-interaction; the collector's attribute extraction (Phase 5) is a second consumer still to
-come.
+interaction, and as of Phase 5 by `packages/scraper`'s `DivarAdapter.normalize` stage, for
+turning Divar's raw extracted text into domain fields.
+
+`packages/scraper` (Phase 5) is the only package that depends on Playwright; it depends on
+`packages/normalizer` and `packages/shared` only, never on `packages/database` directly — a
+job in `apps/worker` composes `@smart-finder/scraper` with `@smart-finder/database` itself
+(`apps/worker/src/divar-collection-handler.ts`), the same composition pattern Phase 4 used for
+`packages/telegram` (ADR-0016).
 
 `packages/matching` is likewise pure and dependency-free (ADR-0007, ADR-0014): no database,
 network, or LLM access, synchronous, and never reads the clock. Its public entry point is

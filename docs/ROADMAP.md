@@ -209,16 +209,72 @@ telegram_user_id`'s `UNIQUE` constraint), `/help`, `/status`, and an explicit
 (`telegram-notification-handler.integration.test.ts`'s idempotency test creates a
 notification, runs the handler twice, and asserts the Telegram API was called exactly once).
 
-## Phase 5 — Source ingestion ⬜
+## Phase 5 — Source ingestion foundation ✅
 
-- ⬜ **Compliance check first:** robots.txt, terms, and access constraints for Divar
-- ⬜ `SourceAdapter` interface (`discover`, `fetchDetail`, `parse`)
-- ⬜ Divar adapter with low concurrency, backoff, circuit breaker, honest user agent
-- ⬜ Collection-run health tracking; delisting only after a healthy run (§22)
-- ⬜ Parser fixture tests from saved fixtures
+`packages/scraper` — the first package with a real external dependency (`playwright`),
+isolated entirely from every other package (ADR-0016). Composed with `@smart-finder/database`
+by a new `apps/worker` job type, `collect_divar`.
 
-**Gate:** if access is not permitted, stop and report. No evasion, fingerprint spoofing, IP
-rotation, or CAPTCHA bypass will be built (MASTER_PROMPT §20).
+- ✅ **Compliance check first, for real:** `curl` confirmed both fixture URLs
+  (`https://divar.ir/s/tehran/rent-apartment`, `https://divar.ir/v/gaSebQzv`) are
+  `robots.txt`-permitted and the site is reachable with no block/CAPTCHA over plain HTTPS —
+  before any Playwright code was written.
+- ✅ **A genuine live Access Spike ran next**, against exactly those two URLs (no other pages,
+  no large-scale crawl) — two real Playwright sessions that captured Divar's actual DOM
+  structure (client-side-rendered list cards, `data-testid="unexpandable-info-row"` +
+  `table.kt-group-row` detail-page patterns, JSON-LD, the last-path-segment posting-id rule).
+  `DivarAdapter` is built directly from these findings, not assumed ones.
+- ✅ `SourceAdapter<RawPage, ParsedFields>` interface (`discover`/`fetch`/`parse`/`normalize`)
+  — `DivarAdapter` the only implementation; every Divar-specific selector centralized in one
+  file (`divar/selectors.ts`).
+- ✅ `BrowserManager` — one reused `chromium` process (not one per listing), bounded
+  navigation timeouts, `IngestionError` classification (`NAVIGATION_TIMEOUT`/`ACCESS_DENIED`/
+  `CAPTCHA`/`SELECTOR_MISSING`/`PARSE_ERROR`/`NORMALIZATION_ERROR`/`PERSISTENCE_ERROR`/
+  `BROWSER_ERROR`/`UNKNOWN_ERROR`), a `CircuitBreaker` primitive. No evasion, fingerprint
+  spoofing, IP rotation, or CAPTCHA bypass anywhere (MASTER_PROMPT §20) —
+  `ACCESS_DENIED`/`CAPTCHA` always hard-stop the whole collection run.
+- ✅ Posting identity `(source_id, source_posting_id)`; `upsertPosting` decides
+  new/unchanged/changed from a caller-computed `content_hash`, one transaction per posting,
+  append-only `posting_version` history. New migration `0004_seed_divar_source.sql` (data
+  seed only — the `source` table already existed from Phase 1).
+- ✅ Collection-run health tracking (`startCollectionRun`/`completeCollectionRun`/
+  `failCollectionRun`, reusing Phase 1's schema as-is) — a run that hard-stops is marked
+  `failed`, never partially `completed`.
+- 🔄 **Delisting only after a healthy, full-catalog run (§22):** `delistUntouchedPostings` is
+  implemented and unit-tested, but deliberately not wired into `collect_divar` — Phase 5's
+  runs are small/bounded (one category URL's worth of listings), so calling it would delist
+  every previously-known posting the run simply didn't happen to revisit. A future
+  full-catalog-sweep design is required first (ADR-0016); flagged, not silently skipped.
+- ✅ Parser/normalization tests from real spike-derived fixtures (not raw HTML dumps) —
+  covering the exact real price string (with its RLM mark), floor, room, area, and
+  construction-year text from `https://divar.ir/v/gaSebQzv`.
+- ✅ A real live smoke test (not just the manual spike) — `adapter.smoke.test.ts`, gated behind
+  `RUN_LIVE_SMOKE=1` the same way the database integration tests gate on Postgres being
+  reachable — ran for real against the two fixture URLs and extracted genuine matching data.
+- 🔄 **Known limitation:** amenities extraction (elevator/parking/storage) is intermittently
+  timing-sensitive against the live site's client-side render — observed directly during the
+  live smoke test, not hidden. Every other field was reliably extracted across multiple live
+  runs.
+- ✅ Two real bugs found and fixed via the tests actually being run against live systems
+  rather than assumed correct: an off-by-one SQL parameter numbering in `upsertPosting`'s
+  UPDATE path (caught by the first live-Postgres integration-test run), and a
+  render-timing race in `discover`/`fetch` (caught by the live smoke test) — see ADR-0016.
+- ✅ `TransactionType`/`PropertyType` stay locked to `"sale"`/`"apartment"` — the rent list URL
+  was genuinely crawled (structure only, per instruction) but a `collect_divar` job asking for
+  `"rent"` is rejected at the worker boundary, not silently allowed through or used to widen
+  the schema.
+- 🔄 **Not touched, per explicit instruction:** the `match.tier` schema/matcher conflict
+  (ADR-0014/ADR-0015) — Phase 5 never writes to `match`, so it never came up.
+- 🔄 **Not built (Phase 6+ territory):** scheduled/recurring collection (the job runs on an
+  explicit payload, not a cron), a second source, candidate-fan-out into `match`, geo-area
+  resolution for `raw_address` (left `null`, never guessed).
+
+**Exit criteria:** the live Access Spike ran for real against the two given fixture URLs and
+is documented with its actual findings (not assumed); `DivarAdapter` is built from those
+findings; the full DISCOVER→FETCH→PARSE→NORMALIZE→PERSIST pipeline is exercised end-to-end
+against a real PostgreSQL instance (`divar-collection-handler.integration.test.ts`); a hard
+access-denial provably aborts a collection run rather than being retried past
+(`ACCESS_DENIED` test in the same suite); `npm run verify` passes in full.
 
 ## Phase 6 — Dedup + property ⬜
 

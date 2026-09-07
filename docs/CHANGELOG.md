@@ -4,6 +4,150 @@ Meaningful implementation changes, newest first. Dates are UTC.
 
 ---
 
+## 2026-09-07 — Phase 5: Divar ingestion foundation
+
+New package: `packages/scraper` — the first package with a real external dependency
+(`playwright`), isolated entirely from every other package (ADR-0016). New `apps/worker` job
+type `collect_divar`, composing `@smart-finder/scraper` with `@smart-finder/database` the same
+way Phase 4 composed `@smart-finder/telegram`. 73 new tests (611 total across the repository,
+up from 538 after Phase 4): 610 executed live plus one live-network smoke test that self-skips
+without `RUN_LIVE_SMOKE=1`, the same way database integration tests self-skip without
+Postgres — run for real during this phase (see below), not left permanently skipped.
+
+### A genuine Access Spike ran before any adapter code was written
+
+Per MASTER_PROMPT's explicit instruction: `curl` first confirmed both fixture URLs
+(`https://divar.ir/s/tehran/rent-apartment`, `https://divar.ir/v/gaSebQzv`) are
+`robots.txt`-permitted and the site returns 200 over plain HTTPS with no block encountered.
+Then two real (not mocked) Playwright sessions ran against exactly those URLs — no other
+pages, no large-scale scraping — and captured Divar's actual page structure: list cards are
+`a[href^="/v/"]` anchors that render client-side; a posting id is reliably the _last path
+segment_ of any `/v/...` URL; detail-page structured fields come from two DOM patterns
+(`data-testid="unexpandable-info-row"` label/value rows and a `table.kt-group-row`
+thead/tbody pairing) plus JSON-LD; amenities are plain "{label}"/"{label} ندارد" text.
+`DivarAdapter` is built directly from these captured findings (ADR-0016).
+
+### `packages/scraper`
+
+- `types.ts` — the `SourceAdapter<RawPage, ParsedFields>` discover/fetch/parse/normalize
+  contract; `DivarAdapter` is the only implementation, but a second source is a new adapter
+  module, not a change to the pipeline shape.
+- `errors.ts` — `IngestionError` with nine classified categories
+  (`NAVIGATION_TIMEOUT`/`ACCESS_DENIED`/`CAPTCHA`/`SELECTOR_MISSING`/`PARSE_ERROR`/
+  `NORMALIZATION_ERROR`/`PERSISTENCE_ERROR`/`BROWSER_ERROR`/`UNKNOWN_ERROR`);
+  `ACCESS_DENIED`/`CAPTCHA` are `isHardStop`.
+- `browser.ts` — `BrowserManager` (one reused `chromium` process, not one per listing;
+  free-tier-cost-conscious), `navigateSafely` (classifies a 403 as `ACCESS_DENIED`, page text
+  naming Divar's own CSP-declared CAPTCHA provider as `CAPTCHA` — recognition only, never a
+  bypass), `CircuitBreaker` (a hard-stop latch primitive).
+- `content-hash.ts` — `computeContentHash`, a deterministic sha256 over exactly the fields
+  that count as "meaningful content," independent of key insertion order.
+- `divar/selectors.ts` — every Divar-specific selector, centralized in one file.
+- `divar/{url,parse,normalize,adapter}.ts` — `DivarAdapter`'s implementation, split into pure
+  (unit-testable without Playwright) URL/parse/normalize functions plus the
+  Playwright-touching `discover`/`fetch` methods. `normalizeDivarFields` reuses Phase 2's
+  `parseMoney`/`parseFloor`/`parseBuildingAge`/`parseAttribute`/`gregorianToJalali` directly —
+  no new parsing logic invented — with one documented deviation (`parseInteger`, not
+  `parseArea`/`parseRooms`, for متراژ/اتاق — see ADR-0016) and one new normalization-boundary
+  function (`buildingAgeYearsFromRaw`, converting Divar's absolute Jalali construction year to
+  the schema's relative age, with an explicit injected `referenceDate` — never a hidden
+  `Date.now()` read).
+
+### `packages/database`
+
+- New migration `0004_seed_divar_source.sql` — a data seed only (`ON CONFLICT DO NOTHING`),
+  not a schema change; `source`'s table already existed from Phase 1's schema.
+- `domain.ts` — `SourceRow`/`CollectionRunRow`/`PostingRow`/`PostingVersionRow`, matching
+  migration `0002_core_schema.sql`'s columns exactly (grepped from the actual SQL, not
+  memory).
+- `source-repository.ts` — `getSourceBySlug`.
+- `collection-run-repository.ts` — `startCollectionRun`/`completeCollectionRun`/
+  `failCollectionRun`/`getCollectionRunById`. A failed run's postings are never trusted for
+  delisting (MASTER_PROMPT §22) — no counts recorded beyond what was true at the failure.
+- `posting-repository.ts` — `upsertPosting`, the core new/unchanged/changed decision, inside
+  one transaction per posting: **new** inserts `posting` + one `posting_version`;
+  **unchanged** touches only `last_seen_at`/`last_collection_run_id`, no new version row;
+  **changed** updates `posting` and appends (never overwrites) a new `posting_version`, never
+  changing the posting's own `id`. Also `getPostingBySourceId`, `getPostingVersions`, and
+  `delistUntouchedPostings` (implemented/tested, not yet called anywhere — see below).
+- **A real bug, caught by the first live-Postgres run of the new integration tests**:
+  `upsertPosting`'s UPDATE-path parameter numbering was off by one (`UPDATABLE_FIELDS` used
+  `$3..$18` against a values array supplying only `$1..$17`), so `$2` was never referenced in
+  the query text and Postgres rejected every "changed" update with "could not determine data
+  type of parameter $2." Fixed (`$2..$17`), re-verified against live Postgres.
+
+### `apps/worker`
+
+- `divar-collection-handler.ts` — the `collect_divar` job handler: orchestrates
+  DISCOVER→FETCH→PARSE→NORMALIZE→PERSIST, owns database bookkeeping (starting/
+  completing/failing the `collection_run`), and never touches a Playwright selector directly.
+  One listing's `IngestionError` is caught and skipped (a bad listing must not sink the whole
+  run); a hard-stop category aborts the entire run immediately and marks it `failed`. Rejects
+  a job payload asking for a transaction/property type the schema doesn't support (see below)
+  before any browser navigation happens.
+- `index.ts` — registers `collect_divar` alongside Phase 4's `send_telegram_notification`;
+  the worker's `BrowserManager` is closed on graceful shutdown alongside the pool and health
+  server.
+
+### Compliance and scope boundaries, enforced in code, not just documentation
+
+- No CAPTCHA bypass, proxy rotation, stealth, or header spoofing anywhere in
+  `packages/scraper` — `ACCESS_DENIED`/`CAPTCHA` are recognized and hard-stop, never retried
+  past or worked around.
+- `TransactionType`/`PropertyType` stay locked to `"sale"`/`"apartment"` (`packages/database`,
+  unchanged from Phase 1) even though the rent list URL was genuinely crawled for structure —
+  `divar-collection-handler.ts`'s `isSupportedListingContext` rejects any other combination at
+  the job-payload boundary, so rent can never silently become product scope.
+- `delistUntouchedPostings` exists and is unit-tested but is deliberately never called from
+  `collect_divar` — Phase 5's collection runs are small/bounded (one category URL's worth of
+  listings), so calling it would wrongly delist every previously-known posting the run simply
+  didn't happen to revisit. Its own doc comment explains the full-catalog precondition; a
+  correct full-sweep design is future work.
+- `match.tier`'s already-known conflict (ADR-0014/ADR-0015) was not touched — Phase 5 never
+  writes to `match`.
+
+### A second real bug, caught by the live smoke test
+
+`discover`/`fetch` initially extracted DOM content immediately after `domcontentloaded`,
+before Divar's client-side render had populated the listing cards / structured detail fields
+— a first live run against the real list page returned zero listings. Fixed by adding a
+bounded `waitForSelector` before extraction in both stages (waiting for the page's own first
+paint, not a retry-past-access-denial or a polling loop). Re-run live afterward: 8 real
+listings discovered from `https://divar.ir/s/tehran/rent-apartment`, and
+`https://divar.ir/v/gaSebQzv` correctly extracted to price 4,100,000,000 Toman, area 110 sqm,
+2 rooms, floor 3 of 5 — matching the original manual spike's own findings exactly. One
+intermittent limitation observed directly during these live runs: the amenities section
+(elevator/parking/storage) is occasionally not yet rendered at extraction time — every other
+field was reliably extracted across multiple live runs; documented as a known limitation, not
+hidden.
+
+### Testing
+
+- Fixture-based parser/normalization tests built from the real spike output (not raw HTML
+  dumps) — including a direct regression test for the RLM-mark price-parsing fix below.
+- Error-classification tests with a mocked Playwright `Page`/`Browser`, covering every
+  `IngestionError` category and the `CircuitBreaker`'s hard-stop latch behavior.
+- `divar-collection-handler.integration.test.ts` — the full pipeline exercised against a real
+  PostgreSQL instance (a stub `BrowserManager`/adapter stands in for Playwright itself, since
+  that side is covered by the adapter's own unit tests and the live smoke test): new listings
+  persist and complete the run; a re-run with unchanged content reports `unchanged`, not
+  `new`; one listing's non-hard-stop failure is skipped while the run completes; a hard-stop
+  (`ACCESS_DENIED`) aborts the whole run and marks it `failed`; an out-of-scope payload
+  (`rent`) is rejected.
+- `adapter.smoke.test.ts` — the live Access Spike captured as a real, re-runnable automated
+  test (`RUN_LIVE_SMOKE=1`), not left only in a scratch directory.
+
+### A compatibility fix to a completed phase, genuinely required and documented
+
+`packages/normalizer/src/text.ts`'s `ZERO_WIDTH` regex covered U+200B/200C/200D/FEFF but not
+U+200E (LRM) / U+200F (RLM) — both Unicode _Format_ characters, so `.trim()` never strips
+them. A real Divar price string (`"‏۴,۱۰۰,۰۰۰,۰۰۰ تومان"`, with a leading RLM) returned
+`{"kind":"unknown"}` from `parseMoney` instead of parsing correctly. Fixed by adding both
+marks to the regex, with a regression test citing the exact real string and a doc-comment
+explanation; the normalizer suite (230→231 tests) re-verified green, plus an independent
+direct check that the exact real string now parses to
+`{"kind":"exact","amountToman":"4100000000"}`.
+
 ## 2026-09-07 — Phase 4: Telegram integration
 
 New package: `packages/telegram`, pure — no database dependency, every network call goes

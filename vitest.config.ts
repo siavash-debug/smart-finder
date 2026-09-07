@@ -27,6 +27,10 @@ export default defineConfig({
         find: "@smart-finder/database",
         replacement: resolvePath("./packages/database/src/index.ts"),
       },
+      {
+        find: "@smart-finder/scraper",
+        replacement: resolvePath("./packages/scraper/src/index.ts"),
+      },
       // See apps/web/src/lib/test-support/server-only-stub.ts for why.
       {
         find: "server-only",

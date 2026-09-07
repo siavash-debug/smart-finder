@@ -11,8 +11,10 @@
  */
 
 import { checkDatabaseHealth, closePool, createPool } from "@smart-finder/database";
+import { BrowserManager, DivarAdapter } from "@smart-finder/scraper";
 import { createLogger, loadWorkerEnv, type ComponentHealth } from "@smart-finder/shared";
 
+import { createCollectDivarHandler, COLLECT_DIVAR_JOB_TYPE } from "./divar-collection-handler.js";
 import { startHealthServer } from "./health-server.js";
 import { createJobPollTick, type JobHandlerRegistry } from "./job-dispatcher.js";
 import { runPollLoop } from "./poll-loop.js";
@@ -22,6 +24,8 @@ import {
   SEND_TELEGRAM_NOTIFICATION_JOB_TYPE,
 } from "./telegram-notification-handler.js";
 import { WORKER_VERSION } from "./version.js";
+
+const DIVAR_NAVIGATION_TIMEOUT_MS = 30_000;
 
 async function main(): Promise<void> {
   const env = loadWorkerEnv();
@@ -39,11 +43,18 @@ async function main(): Promise<void> {
 
   const pool = createPool({ env, logger, applicationName: "smart-finder-worker" });
   const telegramClient = createWorkerTelegramClient(env);
+  const browserManager = new BrowserManager({ navigationTimeoutMs: DIVAR_NAVIGATION_TIMEOUT_MS });
+  const divarAdapter = new DivarAdapter(DIVAR_NAVIGATION_TIMEOUT_MS);
 
   const JOB_HANDLERS: JobHandlerRegistry = {
     [SEND_TELEGRAM_NOTIFICATION_JOB_TYPE]: createSendTelegramNotificationHandler({
       pool,
       telegramClient,
+    }),
+    [COLLECT_DIVAR_JOB_TYPE]: createCollectDivarHandler({
+      pool,
+      browserManager,
+      adapter: divarAdapter,
     }),
   };
 
@@ -78,6 +89,9 @@ async function main(): Promise<void> {
     logger.info("worker shutting down", { status: "stopping" });
     await health.close().catch((error: unknown) => {
       logger.error("health server close failed", { err: error, error_type: "shutdown_error" });
+    });
+    await browserManager.close().catch((error: unknown) => {
+      logger.error("browser manager close failed", { err: error, error_type: "shutdown_error" });
     });
     await closePool(pool).catch((error: unknown) => {
       logger.error("pool close failed", { err: error, error_type: "shutdown_error" });

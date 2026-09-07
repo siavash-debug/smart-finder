@@ -2,7 +2,7 @@
 
 Current state of the project. Updated at the end of every meaningful task.
 
-**Last updated:** 2026-09-07 · **Phase:** 4 (Telegram) — verified complete
+**Last updated:** 2026-09-07 · **Phase:** 5 (Divar ingestion foundation) — implemented, `npm run verify` green, live access spike + smoke test run for real; see below for what's genuinely verified vs. what remains a known limitation
 
 ---
 
@@ -171,6 +171,72 @@ network call goes through an injectable `fetch`), composed by `apps/web` (webhoo
   which scope the phase entirely to the bot webhook flow. `auth_session` is unused so far,
   exactly as Phase 1 left it. Flagged as open, not silently built or silently dropped.
 
+**Phase 5 — Divar ingestion foundation.** New package `packages/scraper` (the first with a
+real external dependency, `playwright`), isolated entirely from every other package
+(ADR-0016). New `apps/worker` job type `collect_divar`. Full detail in ADR-0016 and
+`ROADMAP.md`'s Phase 5 section; summary:
+
+- **A genuine live Access Spike ran first, against real Divar pages**, exactly the two fixture
+  URLs given (`https://divar.ir/s/tehran/rent-apartment` for structure only,
+  `https://divar.ir/v/gaSebQzv` for one real detail page) — confirmed via `curl` that both
+  paths are `robots.txt`-permitted and the site is reachable over plain HTTPS with no
+  block/CAPTCHA encountered, then via two real (not mocked) Playwright sessions that captured
+  the actual DOM structure the adapter is built from. See ADR-0016 for the findings.
+- `DivarAdapter` (`packages/scraper/src/divar/adapter.ts`) implements a generic
+  `SourceAdapter` discover/fetch/parse/normalize contract; every Divar-specific selector is
+  centralized in `divar/selectors.ts`, built from the spike, not assumed.
+- Posting identity is `(source_id, source_posting_id)`; `upsertPosting`
+  (`packages/database/src/posting-repository.ts`) decides new/unchanged/changed purely from a
+  caller-computed `content_hash`, inside one transaction per posting, and never invents a
+  value — a field that doesn't parse cleanly comes out `null`, matching the normalizer's own
+  discipline. New migration `0004_seed_divar_source.sql` (a data seed, not a schema change —
+  `source`'s table already existed from Phase 1's schema).
+- Compliance: no CAPTCHA bypass, proxy rotation, stealth, or header spoofing anywhere in
+  `packages/scraper`. `ACCESS_DENIED`/`CAPTCHA` are classified (`IngestionError.isHardStop`)
+  and hard-stop the whole `collection_run` (marked `failed`, not partially `completed`) — see
+  `divar-collection-handler.ts`. Every other failure category is caught and skips just that
+  one listing.
+- The worker stays free-tier-cost-conscious: one reused Playwright `chromium` process per
+  worker (not one per listing), the existing Postgres job queue (no Redis), and Phase 5's own
+  collection runs are deliberately small/bounded — a handful of listings from one category URL
+  — not a full-catalog crawl.
+- **A real bug was found and fixed by the integration tests, not just written and assumed
+  correct**: `upsertPosting`'s UPDATE-path parameter numbering was off by one (`$3..$18`
+  against a values array that only supplied `$1..$17`), so Postgres rejected every "changed"
+  update with "could not determine data type of parameter $2" — caught immediately by the
+  first live-Postgres test run of that path, fixed, re-verified.
+- A second real bug was found and fixed via the live smoke test: `discover`/`fetch` initially
+  ran the DOM extraction immediately after `domcontentloaded`, before Divar's client-side
+  render had populated the listing cards / structured detail fields, returning zero results
+  against the live site. Fixed with a bounded `waitForSelector` before extraction in both
+  stages (never a poll loop or retry-past-403 — this is waiting for the page's own first
+  paint, not working around access denial).
+- 610 tests pass repo-wide (up from ~538 after Phase 4 — see `CHANGELOG.md` for the exact
+  delta), including a live-Postgres integration suite for the new repositories and the
+  `collect_divar` handler, unit tests for parsing/normalization against real spike-derived
+  fixtures, error-classification tests with mocked Playwright behavior, and a live smoke test
+  (`RUN_LIVE_SMOKE=1`, skipped by default like the database integration tests are when
+  Postgres is unavailable) that ran for real against the two fixture URLs and extracted
+  genuine data matching the spike's own findings exactly (price 4,100,000,000 Toman, area 110
+  sqm, 2 rooms, floor 3 of 5).
+- **Known limitation, not silently hidden:** the amenities section (elevator/parking/storage)
+  occasionally isn't rendered yet at the point `fetch` extracts it — observed intermittently
+  during the live smoke test itself (one run returned all three `undefined`, immediately
+  re-run and they were correctly extracted). A longer or retried wait would likely close this
+  gap but wasn't added this phase to avoid tuning against live-site timing under time
+  pressure; every other field (price, area, rooms, floor) was reliably extracted across
+  multiple live runs.
+- `delistUntouchedPostings` (`packages/database`) is implemented and unit-tested but
+  deliberately not called from `divar-collection-handler.ts` — see ADR-0016; it is only
+  correct once a run covers a source's entire active catalog, which Phase 5's small/bounded
+  runs do not.
+- **Not touched, per explicit instruction:** the `match.tier` schema/matcher tier conflict
+  (ADR-0014/ADR-0015) — Phase 5 doesn't write to `match` at all, so this didn't come up in
+  practice, and it wasn't looked at speculatively either.
+- **Not built:** anything beyond the access foundation — no candidate-fan-out to `match`, no
+  scheduled/recurring collection (the job is invoked with an explicit payload, not on a cron),
+  no second source, no geo-area resolution for `raw_address` (left `null`, not guessed).
+
 ## What is currently broken or unverified?
 
 - **Resolved — Phase 1's integration tests have now been run against a live database.**
@@ -226,14 +292,22 @@ specified`). The 25 integration tests self-skipped rather than failing, and Phas
   (`telegram_welcome`) — no match-alert trigger exists yet (Phase 6+ fan-out is what would
   create one). `createSendTelegramNotificationHandler`'s `renderNotificationText` falls back
   to a generic placeholder for any other template rather than fabricating content.
-- No listings are collected and search is not available — expected this early.
+- Listings can now be collected from Divar via the `collect_divar` job, but nothing schedules
+  that job automatically yet (no cron/recurring trigger exists) and nothing consumes collected
+  postings into `match` yet — search is still not available end-to-end.
+- The amenities-extraction timing gap noted in the Phase 5 summary above — intermittent, not
+  reproduced on every run, not silently ignored.
+- `delistUntouchedPostings` is implemented/tested but not wired in — see the Phase 5 summary
+  and ADR-0016 for why a full-catalog-sweep design is required first.
 
 ## What is the next step?
 
-Awaiting explicit go-ahead — the user's instructions say not to start Phase 5 without it.
-When it comes, Phase 5 is source ingestion: a compliance check first (robots.txt, terms,
-access constraints for Divar), then a `SourceAdapter` interface and a Divar adapter with low
-concurrency, backoff, and a circuit breaker.
+Awaiting explicit go-ahead — the user's instructions say not to start Phase 6 without it.
+Phase 5's own stop conditions (13-point checklist in this session's instructions) require
+stopping here regardless. When Phase 6 is approved, MASTER_PROMPT scopes it to property
+deduplication and market intelligence (candidate matching against `duplicate_candidate`,
+price-history-aware "opportunity" detection) — built on top of the `posting`/`posting_version`
+rows Phase 5 now actually populates.
 
 ## What decisions are locked?
 
@@ -269,6 +343,13 @@ explicit user approval (MASTER_PROMPT §43):
   directly; quiet hours are a fixed 23:00–08:00 Asia/Tehran policy, the same for every user
   (ADR-0015). Changing either — e.g. adding a `processing` value to `notification.status`, or
   a per-user quiet-hours preference — is a schema change and needs explicit approval first.
+- Playwright is isolated to `packages/scraper`; no other package may import it (ADR-0016). No
+  CAPTCHA bypass, proxy rotation, stealth, or header spoofing, ever — `ACCESS_DENIED`/`CAPTCHA`
+  always hard-stop a collection run rather than being retried past. `TransactionType`/
+  `PropertyType` stay locked to `"sale"`/`"apartment"`; a rent/other-property collection job
+  payload is rejected at the worker boundary, not silently coerced or used to widen the
+  schema. `delistUntouchedPostings` must not be called until a collection run genuinely covers
+  a source's full active catalog (ADR-0016).
 
 Reversible engineering choices, changeable without approval: npm workspaces (ADR-0001),
 TypeScript 5.9 (ADR-0002), lazy package creation (ADR-0008), Node 24 LTS in containers

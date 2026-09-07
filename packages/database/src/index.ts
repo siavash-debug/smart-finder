@@ -22,13 +22,19 @@ export { checkDatabaseHealth } from "./health.js";
 
 export type {
   AppUserRow,
+  CollectionRunRow,
+  CollectionRunStatus,
   JobRow,
   JobStatus,
   NotificationChannel,
   NotificationRow,
   NotificationStatus,
+  PostingRow,
+  PostingStatus,
+  PostingVersionRow,
   PropertyType,
   SearchProfileRow,
+  SourceRow,
   TelegramCommandLogRow,
   TransactionType,
 } from "./domain.js";
@@ -81,3 +87,23 @@ export {
   getRecentCommandTimestamps,
   recordTelegramCommand,
 } from "./telegram-rate-limit-repository.js";
+
+export { getSourceBySlug } from "./source-repository.js";
+
+export {
+  completeCollectionRun,
+  failCollectionRun,
+  getCollectionRunById,
+  startCollectionRun,
+  type CollectionRunCounts,
+} from "./collection-run-repository.js";
+
+export {
+  delistUntouchedPostings,
+  getPostingBySourceId,
+  getPostingVersions,
+  upsertPosting,
+  type PostingChangeKind,
+  type UpsertPostingInput,
+  type UpsertPostingResult,
+} from "./posting-repository.js";

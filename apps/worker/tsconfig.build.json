@@ -11,6 +11,7 @@
   "references": [
     { "path": "../../packages/shared/tsconfig.build.json" },
     { "path": "../../packages/database/tsconfig.build.json" },
-    { "path": "../../packages/telegram/tsconfig.build.json" }
+    { "path": "../../packages/telegram/tsconfig.build.json" },
+    { "path": "../../packages/scraper/tsconfig.build.json" }
   ]
 }

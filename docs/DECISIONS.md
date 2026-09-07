@@ -433,3 +433,105 @@ age.ts`'s recognized patterns — and returns `unknown` rather than an AI-assist
   (e.g. a job manually deleted) — acceptable at MVP scale, and `getNotificationById` finding
   nothing simply short-circuits the handler. Quiet hours are not user-configurable yet. A
   buyer's confirmation tap has no undo beyond resending corrected text.
+
+---
+
+## ADR-0016 — Divar ingestion: Playwright isolation, `DivarAdapter`, access-denial hard-stop, and three normalization-boundary decisions
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** Phase 5 adds the first real external-source dependency (Playwright + a headless
+  Chromium) and the first package that talks to a third party at all. MASTER_PROMPT is
+  explicit and **Locked** on several points here: no CAPTCHA bypass/proxy rotation/stealth of
+  any kind; a genuine Access Spike against the two given fixture URLs before writing adapter
+  code; the `rent-apartment` list URL is for learning page _structure_ only and must never
+  become product scope; and the already-known `match.tier` schema/matcher conflict from
+  earlier phases is explicitly not to be touched here.
+- **Decision (isolation):** Playwright lives entirely in the new `packages/scraper` package.
+  `normalizer`/`matching`/`database`/`telegram`/`web` never import it and never know Divar
+  exists. `apps/worker`'s new `collect_divar` job handler (`divar-collection-handler.ts`) is
+  the only place that wires `@smart-finder/scraper`'s `BrowserManager`/`DivarAdapter` to
+  `@smart-finder/database`'s repositories — it owns orchestration and persistence bookkeeping
+  only, never a selector.
+- **Decision (adapter shape):** `SourceAdapter<RawPage, ParsedFields>` (`packages/scraper/src/
+types.ts`) is the discover/fetch/parse/normalize contract a second source would implement
+  later. `DivarAdapter` is the only implementation; every Divar-specific selector lives in one
+  file, `divar/selectors.ts`, built from two live, genuine Playwright sessions against exactly
+  `https://divar.ir/s/tehran/rent-apartment` and `https://divar.ir/v/gaSebQzv` — not assumed,
+  not copied from documentation. Findings: listing cards are plain `a[href^="/v/"]` anchors
+  that render client-side (a `waitForSelector` after `domcontentloaded` is required, confirmed
+  by an initial spike run that returned zero cards without it); a posting's id is reliably the
+  _last path segment_ of any `/v/...` URL, bare or slug-prefixed, confirmed via Divar's own
+  JSON-LD `url` field; JSON-LD supplies `description`/`floorSize`; two independent DOM
+  patterns — a `data-testid="unexpandable-info-row"` label/value row (ودیعه, طبقه) and a
+  `table.kt-group-row` thead/tbody pairing (متراژ, ساخت, اتاق) — cover every other structured
+  field; amenities are plain "{label}"/"{label} ندارد" text handed directly to Phase 2's
+  existing `parseAttribute`, needing no new parsing logic.
+- **Decision (access denial is a hard stop, not a retryable error):** `IngestionError` carries
+  a category (`NAVIGATION_TIMEOUT`, `ACCESS_DENIED`, `CAPTCHA`, `SELECTOR_MISSING`,
+  `PARSE_ERROR`, `NORMALIZATION_ERROR`, `PERSISTENCE_ERROR`, `BROWSER_ERROR`,
+  `UNKNOWN_ERROR`); only `ACCESS_DENIED`/`CAPTCHA` are `isHardStop`. `navigateSafely`
+  classifies a 403 as `ACCESS_DENIED` and page text mentioning Divar's own CSP-declared
+  CAPTCHA provider (`arcaptcha`) as `CAPTCHA` — recognition only, never an attempt to solve or
+  route around either. A `CircuitBreaker` exists for a future multi-navigation-per-run design
+  but the collection-run job handler already gets the equivalent behavior more simply: a
+  hard-stop error thrown from inside one listing's processing is re-thrown past the
+  per-listing `catch` (which absorbs every _other_ category and just skips that one listing),
+  aborting the whole run and marking the `collection_run` `failed` rather than `completed`.
+- **Decision (three normalization-boundary calls, each newly required by real Divar data):**
+  1. **RLM/LRM stripping in `packages/normalizer/src/text.ts`.** Divar's real price text
+     (`"‏۴,۱۰۰,۰۰۰,۰۰۰ تومان"`) has a leading U+200F (RIGHT-TO-LEFT MARK) — a Unicode _Format_
+     character, so `.trim()` never removes it. Phase 2's `ZERO_WIDTH` regex covered
+     U+200B/200C/200D/FEFF but not U+200E/200F, so `parseMoney` silently returned `unknown`
+     for every real Divar price. Fixed by adding both directional marks to that regex, with a
+     regression test citing this exact real string. A genuinely required, narrow compatibility
+     fix to a completed phase, exactly the kind MASTER_PROMPT permits when documented.
+  2. **متراژ/اتاق use `parseInteger`, not `parseArea`/`parseRooms`.** Those two functions
+     require an explicit unit word ("متر", "خواب"/"اتاق") specifically to stop _free text_
+     from being guessed at — but Divar's own table label (متراژ, اتاق) already disambiguates
+     the field unambiguously before the bare digit ever reaches the normalizer, so the guard
+     those functions exist for doesn't apply. Deliberate, documented deviation; see
+     `packages/scraper/src/divar/normalize.ts`'s own comment on `integerFromRaw`.
+  3. **Absolute-year-to-relative-age conversion lives in the adapter's `normalize` stage, not
+     in `packages/normalizer`.** Divar states an absolute Jalali construction year ("ساخت
+     ۱۳۹۵"); `posting.building_age_years` stores a relative age. Converting requires a "now",
+     and Phase 2's `parseBuildingAge` deliberately stays reference-date-free to remain
+     unconditionally deterministic (documented in its own file header). So the conversion —
+     `currentJalaliYear - constructionJalaliYear`, via `gregorianToJalali` — happens in
+     `divar/normalize.ts`'s `buildingAgeYearsFromRaw`, with `referenceDate` an explicit
+     parameter threaded from the job handler (`now()`, itself injectable), never a bare
+     `Date.now()` read inside the normalization logic. A resulting negative age (a
+     "construction year" in the future) comes out `undefined`, not a fabricated value.
+- **Decision (`delistUntouchedPostings` exists but is not called this phase):** it correctly
+  delists everything `active` a `collection_run` didn't touch, but is only correct when that
+  run covers a source's _entire_ active catalog. Phase 5's runs are deliberately small/bounded
+  (the access-spike-scoped category URL, no large-scale crawl), so calling it would delist
+  every previously-known posting merely for not being in this small run — implemented and unit
+  -tested now so a future full-catalog-sweep phase doesn't have to invent it ad hoc, but never
+  wired into `divar-collection-handler.ts`.
+- **Decision (rent stays structure-only, enforced at the worker boundary, not widened
+  anywhere):** `packages/database`'s `TransactionType`/`PropertyType` (`domain.ts`) remain
+  locked to `"sale"`/`"apartment"` — unchanged from Phase 1, no migration made. `ListingContext`
+  in `@smart-finder/scraper` is intentionally broader (`"sale"|"rent"` ×
+  `"apartment"|"house"|"land"|"other"`) because `DivarAdapter` genuinely is that generic — the
+  rent list URL was real, valid Divar structure, just out of _product_ scope. The boundary is
+  enforced in `divar-collection-handler.ts`'s `isSupportedListingContext`: a `collect_divar`
+  job payload asking for anything besides `sale`/`apartment` is rejected outright, before any
+  browser navigation happens. This is a worker-level policy check, not a schema change.
+- **Alternatives considered:** Widening `TransactionType` to include `"rent"` now that a rent
+  URL was genuinely crawled during the spike — rejected, explicitly against MASTER_PROMPT's
+  own instruction for this phase. Retrying past a 403/CAPTCHA with backoff — rejected, that is
+  exactly the workaround compliance forbids; the existing `job` table's ordinary retry/backoff
+  still applies at the _run_ level (a later scheduled run may succeed), which is not a bypass.
+  Calling `delistUntouchedPostings` unconditionally after every completed run — rejected per
+  the correctness reasoning above.
+- **Consequences:** A second source (e.g. a future non-Divar listing site) is a new adapter
+  module plus a new job type, not a change to the pipeline shape. The amenities section
+  occasionally isn't rendered yet when `fetch` extracts (client-side hydration timing observed
+  live, intermittently, during this phase's own smoke test) — `hasElevator`/`hasParking`/
+  `hasStorage` can come back `undefined` on a run that would otherwise have found them; a
+  future phase could add a longer/second wait or a bounded retry, not done here to avoid
+  adding untested timing-tuning under time pressure. `delistUntouchedPostings`'s full-catalog
+  precondition means a source's stale postings are not yet ever automatically delisted —
+  explicitly future work, not a regression from any prior phase (Phase 5 introduces the table
+  it would apply to).

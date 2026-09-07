@@ -40,6 +40,13 @@ describe("normalizeText", () => {
     expect(normalizeText(`${bom}سلام`)).toBe("سلام");
   });
 
+  it("strips right-to-left and left-to-right marks (real Divar price text, ADR-0016)", () => {
+    const rlm = String.fromCharCode(0x200f);
+    const lrm = String.fromCharCode(0x200e);
+    expect(normalizeText(`${rlm}۴,۱۰۰,۰۰۰,۰۰۰ تومان`)).toBe("۴,۱۰۰,۰۰۰,۰۰۰ تومان");
+    expect(normalizeText(`${lrm}test`)).toBe("test");
+  });
+
   it("trims leading and trailing whitespace", () => {
     expect(normalizeText("  سلام  ")).toBe("سلام");
   });

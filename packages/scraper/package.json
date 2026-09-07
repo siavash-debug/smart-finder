@@ -1,23 +1,27 @@
 {
-  "name": "@smart-finder/worker",
+  "name": "@smart-finder/scraper",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "dev": "tsx watch src/index.ts",
     "build": "tsc --build tsconfig.build.json",
     "clean": "tsc --build tsconfig.build.json --clean",
-    "start": "node dist/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@smart-finder/database": "*",
-    "@smart-finder/scraper": "*",
+    "@smart-finder/normalizer": "*",
     "@smart-finder/shared": "*",
-    "@smart-finder/telegram": "*"
-  },
-  "devDependencies": {
-    "tsx": "^4.23.13"
+    "playwright": "^1.63.0"
   }
 }

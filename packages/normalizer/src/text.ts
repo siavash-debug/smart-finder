@@ -26,11 +26,14 @@ const CHAR_MAP: readonly (readonly [RegExp, string])[] = [
 ];
 
 /**
- * Zero-width characters: ZWSP (U+200B), ZWNJ (U+200C, Persian "نیم‌فاصله" half-space — e.g.
- * "می‌خواهم"), ZWJ (U+200D), and the BOM/ZWNBSP (U+FEFF). Stripped entirely rather than kept:
- * removing the ZWNJ from "می‌خواهم" merges it to "میخواهم", which changes rendering but not
- * meaning, and means every other pattern in this package never has to account for an optional
- * invisible character in the middle of a word.
+ * Zero-width and directional-mark characters: ZWSP (U+200B), ZWNJ (U+200C, Persian
+ * "نیم‌فاصله" half-space — e.g. "می‌خواهم"), ZWJ (U+200D), the LTR/RTL marks (U+200E/U+200F —
+ * observed in real Divar price text, e.g. a RLM sitting before the digits of "۴,۱۰۰,۰۰۰,۰۰۰
+ * تومان"; left unstripped, it isn't whitespace to `.trim()` and silently breaks
+ * `money.ts`'s leading-digit match, per Phase 5's ADR-0016), and the BOM/ZWNBSP (U+FEFF).
+ * Stripped entirely rather than kept: removing the ZWNJ from "می‌خواهم" merges it to
+ * "میخواهم", which changes rendering but not meaning, and means every other pattern in this
+ * package never has to account for an optional invisible character in the middle of a word.
  */
 // Built via `new RegExp` from explicit \uXXXX escapes rather than a literal character class:
 // pasting actual zero-width characters into source code makes them invisible in any diff or
@@ -39,7 +42,7 @@ const CHAR_MAP: readonly (readonly [RegExp, string])[] = [
 // Deliberate: ZWJ (U+200D) is one of the characters this class matches, not an accidental
 // joiner between the others.
 // eslint-disable-next-line no-misleading-character-class
-const ZERO_WIDTH = new RegExp("[\\u200B\\u200C\\u200D\\uFEFF]", "g");
+const ZERO_WIDTH = new RegExp("[\\u200B\\u200C\\u200D\\u200E\\u200F\\uFEFF]", "g");
 
 /**
  * Punctuation Divar text uses interchangeably with Latin ASCII equivalents. Fixed-width vs.
