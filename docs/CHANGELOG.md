@@ -4,6 +4,83 @@ Meaningful implementation changes, newest first. Dates are UTC.
 
 ---
 
+## 2026-09-07 — Phase 3: deterministic matching engine
+
+New package: `packages/matching`, pure and dependency-free — no database, network, LLM, or
+wall-clock reads (ADR-0007, ADR-0014). 103 new tests (415 total across the repository, up
+from 312 after Phase 2, all executed live, none skipped).
+
+### A conflict raised and resolved before implementation
+
+The `match.tier` CHECK constraint (migration `0002_core_schema.sql`, already applied and
+verified in Phase 1) and `MASTER_PROMPT.md` §10 both name four uppercase tiers — `EXACT`,
+`STRONG`, `NEAR`, `WEAK`. This phase's own instructions repeatedly specify three lowercase
+tiers instead (`exact`/`strong`/`near`) and explicitly forbid introducing other names
+"unless there is an existing locked domain reason" — which the DB constraint is. Raised with
+the user before any tier logic was written; resolved as three lowercase tiers now, with
+DB/`MASTER_PROMPT` alignment explicitly deferred, since Phase 3 does not write to the `match`
+table yet. Full detail in ADR-0014.
+
+### `score(listing, profile) -> { total, tier, criteria, violations }`
+
+Composed from ten independently-exported pure evaluators:
+
+- `budget.ts` / `area.ts` / `rooms.ts` / `building-age.ts` — all built on one shared generic,
+  `range.ts`'s `evaluateRange<T extends number | bigint>`, so a `[min, max]` bound-vs-actual
+  comparison is written once and reused with `bigint` for money (ADR-0005) and `number`
+  everywhere else. Budget/area/rooms are hard; building age is soft.
+- `floor.ts` — soft. Respects `@smart-finder/normalizer`'s floor categories
+  (`ground`/`basement`/`penthouse`) rather than coercing them to floor 0/-1: a category with
+  no numeric floor against a stated numeric range is `unknown`, never a guess.
+- `attribute.ts` — hard, generic over parking/elevator/storage. Full tri-state × tri-state
+  truth table per MASTER_PROMPT §16: "not requested" always short-circuits to
+  `not_applicable` before the listing's value is even read, so it can never become "required
+  false".
+- `location.ts` — district (hard) and neighborhood (soft) as two separate criteria: a
+  listing in the right district but wrong neighborhood passes the hard gate and scores lower
+  than an exact neighborhood match, per MASTER_PROMPT §17.
+- `tier.ts` — hard violation → `near`, unconditionally, regardless of score. Otherwise, a
+  deviation sum (`unknown` = 1, soft `mismatch` = 2) with thresholds `0` → `exact`, `1`-`2` →
+  `strong`, `>= 3` → `near`.
+- `score.ts` — `100 - 40×hard - 12×soft - 4×unknown`, clamped to `[0, 100]`, integer. Never
+  read by `tier.ts` — a high score can never override a hard violation.
+
+### Documented gaps (ADR-0014), not silently resolved
+
+- Tier naming/count vs. the locked `WEAK` tier — see above.
+- MASTER_PROMPT §19's construction-year examples assume an absolute Jalali year; the locked
+  schema stores a relative age in years instead (`building_age_years`,
+  `min/max_building_age_years`). `evaluateBuildingAge` is built around what's actually
+  stored — which also means comparing two ages needs no reference "now", keeping this
+  package's "no wall-clock dependency" property true without an explicit reference-date
+  parameter.
+- Floor categories have no backing database column (`posting.floor` is a plain integer).
+  `MatchListingSnapshot.floorCategory` exists so the matcher's logic is correct when a
+  caller has one (e.g. straight from a live `parseFloor` result), even though nothing
+  sourced purely from today's database can populate it.
+- `balcony`/`pool`/`guard`/`lobby`/`jacuzzi` are parseable by Phase 2's `attributes.ts` but
+  have no `posting`/`search_profile` columns; only parking/elevator/storage are evaluated.
+
+### Tests
+
+103 new tests: per-evaluator unit tests for every field (boundary, below/above, unknown,
+bigint exactness for budget), the full attribute tri-state truth table, floor-category
+handling, tier-threshold tests including hard-violation dominance, score-bound tests, and a
+`match.test.ts` integration suite covering mixed profiles, every adversarial case
+MASTER_PROMPT names by name (125 sqm vs. a 100 sqm minimum must not fail; 5B vs. a 6B max
+must not fail; unknown parking against a required preference must never become `false`; a
+2-vs-3-bedroom mismatch must not be masked by an excellent price/area; district 2 vs.
+requested district 5 must never reach `exact`; unknown price against a budget cap must not
+become a confirmed violation; `همکف` against a numeric floor range must stay `unknown`, never
+floor 0), plus determinism, purity (inputs unchanged after scoring), bounded-score, and
+tier-consistency property tests.
+
+### Verification
+
+`npx vitest run`: **415 tests, 415 passed, 0 skipped** (25 of them the Phase 1 integration
+tests, still executed live against PostgreSQL). `npm run verify` passes in full: format,
+lint, typecheck, tests, build.
+
 ## 2026-09-07 — Phase 2: Persian engine
 
 New package: `packages/normalizer`, deterministic and dependency-free — no AI, no database

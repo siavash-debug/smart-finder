@@ -78,7 +78,7 @@ smart-finder/
 │   ├── database/            pg pool, typed query helpers, migrations, health probe
 │   ├── normalizer/          Persian text/digit/money/area/rooms/floor/age/attribute/geography
 │   │                        parsing, Jalali calendar, deterministic preference extraction
-│   ├── matching/            (Phase 3) pure deterministic scoring — zero dependencies
+│   ├── matching/            pure deterministic scoring — score(listing, profile), zero deps
 │   ├── telegram/            (Phase 4) bot client, login-signature verification
 │   ├── scraper/             (Phase 5) SourceAdapter interface + per-source adapters
 │   └── ai/                  (Phase 7) provider abstraction, schema-constrained extraction
@@ -102,6 +102,13 @@ apps/worker┘                              ▲
 pure, deterministic, and has no AI dependency (ADR-0012). It is not yet wired into `apps/web`
 or `apps/worker`; the search-profile creation flow (Phase 8 UI) and the collector's attribute
 extraction (Phase 5) are its first real consumers.
+
+`packages/matching` is likewise pure and dependency-free (ADR-0007, ADR-0014): no database,
+network, or LLM access, synchronous, and never reads the clock. Its public entry point is
+`score(listing: MatchListingSnapshot, profile: MatchProfileSnapshot) -> MatchResult`. It is
+not yet wired into `apps/worker`'s match fan-out (see §2 above) — that wiring, plus the
+candidate-profile indexed query and `match` table persistence, is Phase 6+ territory; Phase 3
+delivers the pure scorer those later phases call.
 
 `packages/*` must never import from `apps/*`, and must never import `next/*` — they run in
 both planes.

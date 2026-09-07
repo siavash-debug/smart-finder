@@ -114,17 +114,48 @@ full: format, lint, typecheck, tests, build. Detail in `CHANGELOG.md`.
 **Exit criteria:** normalization unit tests green (312/312, live-verified) — met. A
 benchmarked accuracy baseline against a standalone sentence corpus — **not met**; see above.
 
-## Phase 3 — Matching ⬜
+## Phase 3 — Matching ✅
 
-- ⬜ `packages/matching` — pure, zero-dependency `score(listing, profile)`
-- ⬜ Three-state (`true` / `false` / `unknown`) criterion evaluation
-- ⬜ Phase 1 strict gate, Phase 2 relaxed near-match
-- ⬜ Tiers: `EXACT`, `STRONG`, `NEAR`, `WEAK`
-- ⬜ Explanation objects citing only stored facts, `نامشخص` for unknowns
-- ⬜ Indexed candidate-profile selection query
-- ⬜ Evaluation fixtures: 200 representative listing descriptions
+`packages/matching` — pure, synchronous, zero-dependency (ADR-0007, ADR-0014): no database,
+network, LLM, or wall-clock dependency.
 
-**Exit criteria:** matching tests green; no numeric percentage exposed in the UI contract.
+- ✅ `score(listing: MatchListingSnapshot, profile: MatchProfileSnapshot) -> MatchResult`
+  (`{ total, tier, criteria, violations }`), composed from ten small pure evaluators
+  (`evaluateBudget`, `evaluateArea`, `evaluateRooms`, `evaluateFloor`, `evaluateBuildingAge`,
+  `evaluateAttribute` ×3, `evaluateDistrict`, `evaluateNeighborhood`), each independently
+  exported and unit-tested.
+- ✅ Tri-state (`true`/`false`/`null`=unknown) criterion evaluation throughout — a `null`
+  profile bound is `not_applicable` (never "required false"); a `null` listing value against
+  a stated preference is `unknown` (never a confirmed violation, but distinguished from a
+  match via a small bounded penalty — ADR-0014).
+- ✅ Hard-constraint gate before soft scoring: budget/area/rooms/parking/elevator/storage/
+  district are hard (a confirmed violation forces `tier = "near"`, unconditionally — no score
+  can override it); floor/building-age/neighborhood are soft (ADR-0014 documents the exact
+  split and its reasoning, following MASTER_PROMPT §6's own reasonable-default example).
+- ✅ Tiers: `exact` / `strong` / `near` — three, lowercase, per this phase's explicit
+  instruction. **Known gap, not silently resolved:** `MASTER_PROMPT.md` §10 and the
+  already-migrated `match.tier` CHECK constraint both name a fourth tier, `WEAK`, uppercase.
+  Raised with the user before implementation; resolved as three lowercase tiers now, with
+  DB/`MASTER_PROMPT` alignment explicitly deferred (Phase 3 does not persist to `match` yet).
+  Full detail in ADR-0014.
+- ✅ Explanation strings are structured statements of fact only ("Price is within the
+  requested budget.") — never a value judgement, never LLM-generated. A UI localizes to
+  Persian from the structured `key`/`status`/`requested`/`actual` fields, not this package's
+  English prose.
+- ✅ Bounded integer score `0 <= total <= 100`: `100 - 40×hard - 12×soft - 4×unknown`,
+  clamped. Secondary to tier; `classifyTier` never reads it.
+- 🔄 Not implemented in this phase, correctly out of scope: the indexed candidate-profile
+  selection query and match fan-out wiring (Phase 6+ — this phase delivers only the pure
+  scorer those later phases call), and a standalone 200-listing-description evaluation
+  fixture set (same reasoning as Phase 2's fixture-corpus gap — see that phase's entry — this
+  phase's actual instructions asked for comprehensive unit/property/adversarial tests
+  instead, delivered as 103 new tests including every adversarial case the brief names by
+  name).
+
+**Exit criteria:** matching tests green (415/415 repo-wide, live-verified, 0 skipped) — met.
+No numeric percentage exposed anywhere in the public contract (`total` is a plain bounded
+integer, never formatted as a percentage) — met. Indexed candidate-profile query and the
+200-listing fixture corpus — not built; see above, tracked as open in `PROJECT_CONTEXT.md`.
 
 ## Phase 4 — Telegram ⬜
 

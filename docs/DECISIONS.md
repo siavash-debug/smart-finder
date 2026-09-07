@@ -270,3 +270,96 @@ age.ts`'s recognized patterns — and returns `unknown` rather than an AI-assist
   reference dates (`jalali.test.ts`), rather than by relying on an already-widely-tested
   library. `jalCal`'s supported domain is Jalali years `[-61, 3178)`; outside that, every
   public function in the module fails closed (`null`) rather than throwing.
+
+---
+
+## ADR-0014 — Matching engine: hard/soft split, unknown semantics, tier rules, and three known gaps
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** Phase 3 builds `packages/matching`'s `score(listing, profile)`. Neither the
+  locked `search_profile`/`posting` schema (migration `0002_core_schema.sql`) nor
+  `MASTER_PROMPT.md` specifies which constraints are hard (can reject a listing) versus soft
+  (affect ranking only), nor the exact tier thresholds — both are explicitly left to this
+  phase to establish conservatively and document (per this phase's own instructions). Three
+  concrete conflicts surfaced against already-locked material while doing so; none blocked
+  implementation, but all three are documented here rather than silently resolved one way.
+- **Decision:**
+  - **Hard constraints** (a confirmed violation forces `tier = "near"`, regardless of score):
+    budget (`min/max_price_toman`), area (`min/max_area_sqm`), rooms (`min/max_rooms`),
+    `require_parking`/`require_elevator`/`require_storage` (both the `true` and `false`
+    direction — "must have" and "must not have" are equally hard), and district
+    (`district_geo_area_id`).
+  - **Soft preferences** (affect score and tier, never force a violation-driven `near`):
+    floor (`min/max_floor`), building age (`min/max_building_age_years`), and neighborhood
+    (`neighborhood_geo_area_id` — a listing in the right district but the wrong neighborhood
+    stays past the hard gate, per MASTER_PROMPT §17's own instruction that a neighborhood
+    match should score better than a district-only match, not that a neighborhood mismatch
+    should reject the listing).
+  - **Unknown semantics:** a `null` profile bound/preference is `not_applicable` (nothing was
+    asked, so nothing can be violated) and is evaluated before the listing's value is even
+    read — "not requested" can never become "required false". A `null` listing value against
+    a _stated_ preference is `unknown`: never a violation, but distinguished from a confirmed
+    match by contributing 1 point of "deviation" toward tier classification and a small,
+    bounded (4-point) penalty toward the score — enough that an all-unknown listing scores
+    below an all-matched one, not so much that unknown functions as a disguised failure.
+  - **Tier rule** (`tier.ts`): any hard violation → `near`, unconditionally. Otherwise, sum
+    deviation across evaluated criteria (`unknown` = 1, soft `mismatch` = 2); `0` → `exact`,
+    `1`-`2` → `strong`, `>= 3` → `near`. Chosen as the simplest rule that satisfies "hard
+    violation dominance" and "strong allows _limited_ unknowns/soft mismatches, near reflects
+    _meaningful_ deviation" without a weighted formula (MASTER_PROMPT §9-§10 for this phase:
+    "avoid overly complicated weighted formulas").
+  - **Score** (`score.ts`): `100 - 40×(hard violations) - 12×(soft mismatches) -
+4×(unknowns)`, clamped to `[0, 100]`, integer. Secondary to tier; `tier.ts` never reads
+    it.
+- **Reason:** MASTER_PROMPT §6's own reasonable-default example lists exactly this hard/soft
+  split (`budget_max`, `area_min`, `bedrooms_exact`, `parking_required`, `elevator_required`,
+  `district_required` as hard; "preferred floor", "preferred newer construction" as soft) —
+  followed directly rather than inventing an alternative. The unknown-penalty magnitude (4,
+  versus 40 for a hard violation) is chosen so no combination of unknowns can numerically
+  exceed a single hard violation's penalty within the bounded `[0, 100]` score, keeping "never
+  let unknown function as a disguised failure" true by construction, not just in the common
+  case.
+- **Alternatives:** A single weighted linear formula across all criteria (rejected — hides
+  hard violations inside a number, exactly what MASTER_PROMPT §10 forbids: "do not hide
+  violations inside a numeric score"). Treating every populated profile field as
+  automatically hard (rejected — explicitly against this phase's instructions, and would make
+  a stated floor preference block otherwise-good listings). A four-tier scheme including
+  `WEAK` (see "known gaps" below — deferred, not rejected).
+- **Known gaps, deliberately deferred rather than silently invented:**
+  1. **Tier naming/count.** This package's public `MatchTier` is exactly `"exact" | "strong" |
+"near"` (lowercase, three values), per this phase's explicit, repeated instruction.
+     `MASTER_PROMPT.md` §10 and the already-migrated `match.tier` CHECK constraint (migration
+     `0002_core_schema.sql`) both name a fourth tier, `WEAK`, uppercase. Raised with the user
+     before implementation; resolved as: three lowercase tiers now, DB/`MASTER_PROMPT`
+     alignment deferred, since Phase 3 does not write to the `match` table yet (no immediate
+     collision). Whoever wires `score()`'s output into the `match` table needs either a
+     persistence-layer mapping (`"near"` → `'NEAR'`, and a rule for what produces `'WEAK'`)
+     or a follow-up migration — not resolved here.
+  2. **Construction year vs. building age.** MASTER_PROMPT §19's own worked examples compare
+     an absolute Jalali construction year (e.g. "profile minimum = 1400, listing = 1402").
+     The locked schema instead stores a _relative_ age in years (`building_age_years`,
+     `min/max_building_age_years`) on both `posting` and `search_profile` — not a year at
+     all. `evaluateBuildingAge` is built around what the schema actually stores; comparing
+     two ages needs no reference "now" either, which keeps this package's "no wall-clock
+     dependency" property (MASTER_PROMPT §2) true without needing an explicit reference date
+     parameter. If an absolute construction year is wanted later, that's a schema change
+     (a new column), not a matcher change.
+  3. **Floor categories have no column.** `@smart-finder/normalizer`'s `parseFloor` can
+     distinguish `ground`/`basement`/`penthouse` from a plain numeric floor (Phase 2), but
+     `posting.floor` is a plain nullable integer with no category column. `MatchListingSnapshot`
+     carries an optional `floorCategory` field so the matcher's _logic_ is correct today (a
+     category never gets coerced to floor 0/-1, and correctly evaluates to `unknown` against
+     a numeric range), but no listing sourced purely from the current database can ever
+     populate it — only a caller working from a live `@smart-finder/normalizer` parse result
+     could. Persisting floor categories is a future schema change, not something this phase
+     invents a workaround for.
+  4. **Balcony and other unlisted attributes.** `@smart-finder/normalizer`'s `attributes.ts`
+     can parse `balcony`/`pool`/`guard`/`lobby`/`jacuzzi` from text (Phase 2), but neither
+     `posting` nor `search_profile` has columns for them (only `has_parking`/`has_elevator`/
+     `has_storage` exist). `packages/matching` only evaluates the three attributes the schema
+     actually persists.
+- **Consequences:** `packages/matching` stays strictly faithful to the locked schema shape —
+  every field it reads has a real column behind it (`floorCategory` aside, which is
+  explicitly documented as schema-less). The four gaps above are structural, not oversights;
+  each is fixable by a future schema change without touching this package's evaluation logic.

@@ -2,7 +2,7 @@
 
 Current state of the project. Updated at the end of every meaningful task.
 
-**Last updated:** 2026-09-07 · **Phase:** 2 (Persian engine) — verified complete
+**Last updated:** 2026-09-07 · **Phase:** 3 (Matching) — verified complete
 
 ---
 
@@ -92,6 +92,42 @@ zero-dependency (no AI, no database — ADR-0012). Eleven modules; full detail i
   measured accuracy percentage. Flagged as an open item rather than silently marked done;
   see `ROADMAP.md` for detail.
 
+**Phase 3 — Matching. Verified complete** — `packages/matching`, pure, synchronous,
+zero-dependency (no database, network, LLM, or wall-clock reads — ADR-0007, ADR-0014). Full
+detail in `ROADMAP.md`'s Phase 3 section and `CHANGELOG.md`. Summary:
+
+- `score(listing, profile) -> { total, tier, criteria, violations }`, composed from ten
+  independently-exported pure evaluators.
+- Hard/soft constraint split established and documented (ADR-0014): budget, area, rooms,
+  parking/elevator/storage, and district are hard (a confirmed violation caps `tier` at
+  `"near"`, unconditionally); floor, building age, and neighborhood are soft.
+- Tri-state semantics throughout: "not requested" (`null` profile value) is always
+  `not_applicable`, never coerced to "required false"; "unknown" (`null` listing value
+  against a stated preference) is always distinguished from a confirmed violation.
+- Tiers: `exact`/`strong`/`near` (three, lowercase) — a real, already-locked conflict was
+  found and raised with the user before writing any tier logic: `MASTER_PROMPT.md` §10 and
+  the already-migrated `match.tier` CHECK constraint both name a fourth tier, `WEAK`,
+  uppercase. Resolved (user's explicit choice): three lowercase tiers now, DB/`MASTER_PROMPT`
+  alignment deferred since Phase 3 doesn't persist to `match` yet. Documented in ADR-0014.
+  Two further schema-shape gaps also surfaced and are documented there rather than silently
+  worked around: `MASTER_PROMPT` §19's construction-year examples assume an absolute Jalali
+  year, but the locked schema stores a relative age in years instead (`evaluateBuildingAge`
+  is built around what's actually stored); and floor categories (`ground`/`basement`/
+  `penthouse`, from Phase 2's `parseFloor`) have no backing database column, so
+  `MatchListingSnapshot`'s `floorCategory` field is correct in logic but unreachable from
+  data sourced purely from today's database.
+- 103 new tests (415 total repo-wide, up from 312 after Phase 2, all executed live, 0
+  skipped): every adversarial case MASTER_PROMPT names by name (125 sqm vs. a 100 sqm
+  minimum, 5B vs. a 6B max, unknown parking against a required preference, a 2-vs-3-bedroom
+  mismatch not masked by an excellent price/area, district 2 vs. requested district 5, unknown
+  price against a budget cap), plus determinism/purity/bounded-score/tier-consistency/
+  explainability property tests.
+- **Not built:** the indexed candidate-profile selection query and match fan-out wiring
+  (correctly out of scope — Phase 6+), and a standalone 200-listing-description evaluation
+  fixture set (same reasoning as Phase 2's fixture-corpus gap: this phase's actual
+  instructions asked for comprehensive tests, delivered in depth, but not that specific
+  artifact). Flagged as open rather than silently marked done.
+
 ## What is currently broken or unverified?
 
 - **Resolved — Phase 1's integration tests have now been run against a live database.**
@@ -130,18 +166,24 @@ specified`). The 25 integration tests self-skipped rather than failing, and Phas
 - `packages/normalizer` is not yet wired into `apps/web` or `apps/worker` — expected: its
   first real consumers are the Phase 8 UI (search-profile creation) and the Phase 5
   collector (listing attribute extraction).
+- `packages/matching` is likewise not yet wired anywhere — expected: it has no caller until
+  the candidate-fan-out pipeline (Phase 6+) or a manual test harness invokes it.
+- A standalone 200-listing-description evaluation fixture set for the matcher was not built
+  — see the Phase 3 summary above and `ROADMAP.md` for detail.
+- Three schema-shape gaps documented in ADR-0014, not silently worked around: (1) the tier
+  naming/count mismatch between this phase's 3-lowercase-tier scope and the already-locked
+  4-tier uppercase `match.tier` CHECK constraint / `MASTER_PROMPT.md` §10; (2) building age
+  is modeled as a relative-years range, not the absolute Jalali construction year
+  `MASTER_PROMPT` §19's examples assume; (3) floor categories have no database column to
+  persist to.
 - No listings are collected and search is not available — expected this early.
 
 ## What is the next step?
 
-**Phase 3 — Matching.** `packages/matching`: a pure, zero-dependency `score(listing,
-profile)` function; three-state (`true`/`false`/`unknown`) criterion evaluation; a two-phase
-strict-gate/relaxed-near-match design; match tiers (EXACT/STRONG/NEAR/WEAK) with an
-explanation built from actual stored facts, never fabricated. `packages/normalizer`'s output
-types (`ExtractedPreferences`, the individual parse results) are the natural input shape for
-a `search_profile`'s structured spec once Phase 8 wires the UI up to them.
-
-Not started yet — awaiting explicit go-ahead per current instructions.
+Awaiting explicit go-ahead — the user's Phase 3 instructions say not to start Phase 4 without
+it. When it comes, Phase 4 is Telegram: bot client and Persian message templates, login-widget
+HMAC verification, the notification state machine (`pending`→`sent`/`failed`/`suppressed`)
+with idempotency, retries, and quiet hours.
 
 ## What decisions are locked?
 
@@ -161,6 +203,13 @@ explicit user approval (MASTER_PROMPT §43):
 - `packages/normalizer` is fully deterministic: no AI, no database dependency (ADR-0012).
   Every parse function returns an explicit unknown result rather than a guess when a rule
   doesn't confidently apply.
+- `packages/matching`'s hard/soft constraint split, unknown-value semantics, and
+  exact/strong/near tier rule are fixed as documented in ADR-0014 — a confirmed hard
+  violation always caps `tier` at `"near"`; "not requested" is never "required false"; an
+  unknown listing value is never a confirmed violation. Changing the hard/soft split for any
+  specific field, or the tier thresholds, needs explicit user approval same as any other
+  locked decision, even though it isn't verbatim `MASTER_PROMPT` text — it was established
+  precisely because `MASTER_PROMPT` left it to this phase to decide conservatively.
 
 Reversible engineering choices, changeable without approval: npm workspaces (ADR-0001),
 TypeScript 5.9 (ADR-0002), lazy package creation (ADR-0008), Node 24 LTS in containers
