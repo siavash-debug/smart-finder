@@ -4,6 +4,96 @@ Meaningful implementation changes, newest first. Dates are UTC.
 
 ---
 
+## 2026-09-07 — Phase 2: Persian engine
+
+New package: `packages/normalizer`, deterministic and dependency-free — no AI, no database
+(ADR-0012). Eleven modules plus the `extractPreferences` orchestrator, 230 module-level tests
+plus 15 integration-style tests for `extractPreferences` itself (245 new tests; 312 total
+across the repository, up from 82 after Phase 1).
+
+### Modules
+
+- `text.ts` — Persian/Arabic character normalization (`ي/ى→ی`, `ك→ک`, Heh variants,
+  hamza-Alef variants). Alef with madda (`آ`) is deliberately excluded from the fold — a real
+  bug caught by its own test suite: an early version collapsed "آپارتمان" to "اپارتمان",
+  destroying a meaningful letter, not a typo variant. Also strips zero-width characters
+  (ZWSP/ZWNJ/ZWJ/BOM) and collapses Unicode-width whitespace. Idempotent by construction and
+  tested as such. Invisible/whitespace regex literals are built via `new RegExp` from
+  explicit `\uXXXX` escape strings rather than pasting the actual invisible characters into
+  the source file, so they stay visible in review and diffs.
+- `digits.ts` — Persian/Arabic-Indic/Latin digit normalization; `parseDecimalLiteral` is
+  strict about grouping (`"12,5"` is rejected, not silently accepted) and returns an exact
+  `{integer, fraction, fractionDigits}` structure; `scaleDecimalToBigInt` multiplies by a
+  scale (e.g. one billion) using only `bigint` arithmetic — no floating point anywhere in the
+  money path, including the case that would expose float drift (`0.1 * 1_000_000_000`).
+- `number-words.ts` — Persian number words (units/tens/hundreds/هزار/میلیون/میلیارد) via one
+  accumulate-and-flush algorithm that serves both a plain count ("صد و بیست و پنج" → 125) and
+  a cross-scale money compound ("پنج میلیارد و دویست میلیون" → 5,200,000,000).
+- `money.ts` — total vs. per-square-meter (`متری`), exact vs. range, an `approximate` flag
+  for `حدود`/`تقریبا`/`نزدیک`, Rial→Toman conversion (exact division by 10, rejected rather
+  than rounded if not whole), and a hard ambiguity rule: a bare number with neither an
+  explicit currency word nor a scale word anywhere in the expression is `unknown` — "500"
+  alone is not a price.
+- `area.ts` — requires a unit suffix (`متر`/`متری`/`m`/`m2`/`sqm`); a bare number is `unknown`
+  rather than guessed. `at_least`/`at_most` comparators (`بیشتر از`/`کمتر از`) and an
+  `approximate` flag, both preserved explicitly rather than collapsed into a plain value.
+- `rooms.ts` — digit and word counts with `خواب`/`خوابه`/`اتاق`/`اتاق خواب`. Structurally
+  cannot false-positive on an unrelated number: MASTER_PROMPT's own adversarial example,
+  `"۱۲۵ متر، ۲ پارکینگ"`, is a direct test case and correctly returns `unknown`.
+- `floor.ts` — numeric floor, ordinal words (`سوم`→3), "N از M", and `همکف`/`زیرزمین`/
+  `پنت‌هاوس` as their own `kind: "category"` result — not mapped to an arbitrary integer,
+  since `posting.floor` (migration `0002_core_schema`) has no category column to map onto.
+- `building-age.ts` — explicit Jalali construction year (`ساخت ۱۴۰۲`), `نوساز`/`کلیدنخورده`,
+  and relative age (`۵ ساله`) kept as _relative_ rather than resolved to an absolute year —
+  doing that needs a reference "now", which would make the parser's output depend on when it
+  happens to run.
+- `attributes.ts` — tri-state (`true`/`false`/`null`) parking/elevator/storage/balcony/pool/
+  guard/lobby/jacuzzi. Absence of a mention is always `null` (unknown), never `false`; a bare
+  checklist-style mention (just "پارکینگ" with no further qualifier) defaults to `true`,
+  matching how real listings enumerate amenities; contradictory mentions resolve to unknown.
+  A real bug caught here too: punctuation left glued to a token by `normalizeText` (which
+  canonicalizes character forms but doesn't add spacing) broke noun matching until tokens
+  were stripped of edge punctuation before comparison.
+- `geography.ts` — a small, explicitly seeded Tehran neighborhood/district alias list (not a
+  speculative database, per MASTER_PROMPT §9), with digit normalization applied so `"منطقه
+۲"` and `"منطقه 2"` resolve identically.
+- `jalali.ts` (ADR-0013) — Jalali↔Gregorian conversion implemented in-house from the standard
+  Borkowski/Fliegel-Van-Flandern algorithms rather than a dependency, to keep the package
+  fully dependency-free. A real bug here too: the initial `div` helper was `Math.trunc`
+  passed directly as a two-argument function — `Math.trunc` only reads its first argument, so
+  `div(a, b)` silently ignored `b` and produced billion-scale garbage dates. Caught
+  immediately by the test suite (55 tests: round-trip across 21 years, a 3-year consecutive-
+  day walk with no gaps/duplicates, Nowruz-is-always-March-20-or-21 across 40 years, two
+  independently-recalled documented reference dates — Nowruz 1400 = 2021-03-21, Nowruz 1403 =
+  2024-03-20 — and invalid-date rejection), never reached the committed state.
+- `preferences.ts` — `extractPreferences(text)`, the non-AI extraction pipeline. Splits input
+  on commas into clauses (not "و", which is part of money's own compound grammar), then
+  searches every contiguous token window within a clause for each field — necessary because
+  MASTER_PROMPT §14's own worked example packs area, room count, and district into one clause
+  alongside ordinary sentence text, not its own clause per field. Both of the brief's worked
+  examples (§12 and §14) are direct test cases and pass. Explicit `required`/`forbidden`/
+  `no_preference`/`unknown` states for attributes — `"پارکینگ مهم نیست"` becomes
+  `no_preference`, never `forbidden` and never silently `unknown`.
+
+### Documentation
+
+- ADR-0012 (`packages/normalizer` is fully deterministic — no AI, no database dependency) and
+  ADR-0013 (in-house Jalali conversion) added to `DECISIONS.md`.
+- `ARCHITECTURE.md` updated: `packages/normalizer` moved from "(Phase 2, planned)" to its
+  actual module list; noted as dependency-free and not yet wired into `apps/web`/`apps/worker`.
+- `ROADMAP.md` Phase 2 marked complete, with one explicit exception: a standalone 50–100-
+  sentence evaluation corpus with a measured accuracy baseline (an aspiration recorded in
+  `ROADMAP.md` back in Phase 0) was not built as its own artifact. This session's actual
+  Phase 2 instructions asked for comprehensive unit tests instead, delivered as 312 tests
+  including the brief's own worked examples and explicit adversarial cases — real coverage,
+  but not the same artifact, and flagged as still open rather than silently marked done.
+
+### Verification
+
+`npx vitest run`: **312 tests, 312 passed, 0 skipped** (25 of them the Phase 1 integration
+tests, executed live against PostgreSQL as before). `npm run verify` passes in full: format,
+lint, typecheck, tests, build.
+
 ## 2026-09-07 — Phase 1 verification: live database
 
 Docker Desktop and the host disk-space issue (see the "Known gap" in the entry below) are

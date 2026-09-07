@@ -76,7 +76,8 @@ smart-finder/
 ├── packages/
 │   ├── shared/              env loading, structured logging, domain primitives, errors
 │   ├── database/            pg pool, typed query helpers, migrations, health probe
-│   ├── normalizer/          (Phase 2) Persian text/number/currency/area/date normalization
+│   ├── normalizer/          Persian text/digit/money/area/rooms/floor/age/attribute/geography
+│   │                        parsing, Jalali calendar, deterministic preference extraction
 │   ├── matching/            (Phase 3) pure deterministic scoring — zero dependencies
 │   ├── telegram/            (Phase 4) bot client, login-signature verification
 │   ├── scraper/             (Phase 5) SourceAdapter interface + per-source adapters
@@ -94,7 +95,13 @@ apps/web ──┐
 apps/worker┘                              ▲
                                           │
            packages/matching ─────────────┘  (types only; no runtime deps)
+           packages/normalizer ───────────┘  (types only; no runtime deps)
 ```
+
+`packages/normalizer` has no dependency on `database`, `shared`, or any other package — it is
+pure, deterministic, and has no AI dependency (ADR-0012). It is not yet wired into `apps/web`
+or `apps/worker`; the search-profile creation flow (Phase 8 UI) and the collector's attribute
+extraction (Phase 5) are its first real consumers.
 
 `packages/*` must never import from `apps/*`, and must never import `next/*` — they run in
 both planes.

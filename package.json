@@ -13,11 +13,11 @@
     "apps/*"
   ],
   "scripts": {
-    "build:packages": "tsc --build packages/shared/tsconfig.build.json packages/database/tsconfig.build.json apps/worker/tsconfig.build.json",
-    "watch:packages": "tsc --build packages/shared/tsconfig.build.json packages/database/tsconfig.build.json --watch",
+    "build:packages": "tsc --build packages/shared/tsconfig.build.json packages/normalizer/tsconfig.build.json packages/database/tsconfig.build.json apps/worker/tsconfig.build.json",
+    "watch:packages": "tsc --build packages/shared/tsconfig.build.json packages/normalizer/tsconfig.build.json packages/database/tsconfig.build.json --watch",
     "build": "npm run build:packages && npm run build --workspace @smart-finder/web",
     "typecheck": "npm run build:packages && npm run typecheck --workspaces --if-present",
-    "clean": "tsc --build --clean packages/shared/tsconfig.build.json packages/database/tsconfig.build.json apps/worker/tsconfig.build.json",
+    "clean": "tsc --build --clean packages/shared/tsconfig.build.json packages/normalizer/tsconfig.build.json packages/database/tsconfig.build.json apps/worker/tsconfig.build.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

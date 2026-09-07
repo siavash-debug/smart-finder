@@ -2,7 +2,7 @@
 
 Current state of the project. Updated at the end of every meaningful task.
 
-**Last updated:** 2026-09-07 · **Phase:** 1 (Core domain) — verified complete
+**Last updated:** 2026-09-07 · **Phase:** 2 (Persian engine) — verified complete
 
 ---
 
@@ -61,6 +61,37 @@ failure).
   below.**
 - 20 new unit tests for `computeBackoffMs` and the job dispatcher's pure dispatch logic.
 
+**Phase 2 — Persian engine. Verified complete** — `packages/normalizer`, deterministic,
+zero-dependency (no AI, no database — ADR-0012). Eleven modules; full detail in
+`ROADMAP.md`'s Phase 2 section and `CHANGELOG.md`. Summary:
+
+- `text.ts` (character/whitespace/punctuation normalization, idempotent), `digits.ts`
+  (Persian/Arabic-Indic/Latin digits, strict decimal parsing, exact `bigint` scaling —
+  never floating point), `number-words.ts` (Persian number words including
+  هزار/میلیون/میلیارد).
+- `money.ts`, `area.ts`, `rooms.ts`, `floor.ts`, `building-age.ts`, `attributes.ts` — each
+  documented in detail in ADR-adjacent module comments; every one returns an explicit
+  `unknown` result rather than a guess when the input doesn't clearly justify a value
+  (MASTER_PROMPT §16). Attributes are tri-state (`true`/`false`/`null`=unknown) — absence of
+  a mention is never coerced to `false`.
+- `geography.ts` — a small seeded Tehran neighborhood/district alias list, not a database
+  dependency (ADR-0012).
+- `jalali.ts` — Jalali↔Gregorian conversion implemented in-house (ADR-0013), verified by
+  round-trip and structural tests plus two documented reference dates.
+- `preferences.ts` — `extractPreferences(text)`, the non-AI extraction pipeline MASTER_PROMPT
+  §12 asks for. Both of the brief's own worked examples (§12 and §14, including the full
+  multi-clause Persian sentence) are direct test cases and pass.
+- 312 tests total across the whole repository (up from 82 after Phase 1), all executed live
+  — 0 skipped. `npm run verify` passes in full: format, lint, typecheck, tests, build.
+- **Not built:** a standalone 50–100-sentence evaluation corpus with a recorded accuracy
+  baseline, which `ROADMAP.md`'s Phase 2 entry (written back in Phase 0, before this
+  session's actual Phase 2 instructions arrived) had listed as an exit criterion. This
+  session's real instructions asked for comprehensive unit tests, which were delivered in
+  depth (312 tests, including the brief's own worked examples and explicit adversarial
+  false-positive cases) — but that is not the same artifact as a separate corpus file with a
+  measured accuracy percentage. Flagged as an open item rather than silently marked done;
+  see `ROADMAP.md` for detail.
+
 ## What is currently broken or unverified?
 
 - **Resolved — Phase 1's integration tests have now been run against a live database.**
@@ -91,13 +122,24 @@ specified`). The 25 integration tests self-skipped rather than failing, and Phas
 
 - The `Dockerfile.web` build gap from Phase 0 remains open — unrelated to this verification
   and out of scope for it; revisit separately.
+- A standalone 50–100-sentence Persian evaluation corpus with a measured accuracy baseline
+  was not built in Phase 2 — see the Phase 2 summary above and `ROADMAP.md` for detail. The
+  312-test suite covers the same ground in a different, arguably more rigorous shape
+  (exact worked examples, adversarial cases, property tests), but not as that specific
+  artifact.
+- `packages/normalizer` is not yet wired into `apps/web` or `apps/worker` — expected: its
+  first real consumers are the Phase 8 UI (search-profile creation) and the Phase 5
+  collector (listing attribute extraction).
 - No listings are collected and search is not available — expected this early.
 
 ## What is the next step?
 
-**Phase 2 — Persian engine.** Character/digit normalization, currency (Rial→Toman), area
-parsing, Jalali dates, Tehran geography model, deterministic (non-AI) preference extraction,
-plus the 50–100 sentence fixture corpus named in MASTER_PROMPT §32.
+**Phase 3 — Matching.** `packages/matching`: a pure, zero-dependency `score(listing,
+profile)` function; three-state (`true`/`false`/`unknown`) criterion evaluation; a two-phase
+strict-gate/relaxed-near-match design; match tiers (EXACT/STRONG/NEAR/WEAK) with an
+explanation built from actual stored facts, never fabricated. `packages/normalizer`'s output
+types (`ExtractedPreferences`, the individual parse results) are the natural input shape for
+a `search_profile`'s structured spec once Phase 8 wires the UI up to them.
 
 Not started yet — awaiting explicit go-ahead per current instructions.
 
@@ -116,10 +158,14 @@ explicit user approval (MASTER_PROMPT §43):
   decides a match. Unknown is `نامشخص`, never `false` (ADR-0007) — reflected in the schema as
   nullable three-state booleans (`has_elevator`, `require_parking`, etc.), never a default of
   `false`.
+- `packages/normalizer` is fully deterministic: no AI, no database dependency (ADR-0012).
+  Every parse function returns an explicit unknown result rather than a guess when a rule
+  doesn't confidently apply.
 
 Reversible engineering choices, changeable without approval: npm workspaces (ADR-0001),
 TypeScript 5.9 (ADR-0002), lazy package creation (ADR-0008), Node 24 LTS in containers
-(ADR-0009), the `/healthz` + `/readyz` split (ADR-0010), lazy repository creation (ADR-0011).
+(ADR-0009), the `/healthz` + `/readyz` split (ADR-0010), lazy repository creation (ADR-0011),
+in-house Jalali conversion instead of a date-library dependency (ADR-0013).
 
 ## Working agreements
 

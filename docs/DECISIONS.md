@@ -205,3 +205,68 @@ without explicit user approval (see MASTER_PROMPT §43).
   rather than a concrete `Pool`, so it can run against a plain pool or against a client already
   inside a transaction (see `pool.ts`). `replaceActiveSearchProfile` is the one exception — it
   opens its own transaction internally and so needs a real `Pool`, not a `Queryable`.
+
+---
+
+## ADR-0012 — `packages/normalizer` is fully deterministic: no AI, no database dependency
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** Phase 2 builds Persian text/number/money/area/rooms/floor/age/attribute/
+  geography parsing and `extractPreferences`. MASTER_PROMPT §13/§17 explicitly forbid an LLM
+  dependency in this phase, and §2 (AI policy) says AI may assist deterministic systems but
+  must never replace them. It would have been possible to build a thinner rule-based layer
+  now and defer the harder cases (ambiguous phrasing, novel neighborhood names) to an AI
+  fallback in Phase 7.
+- **Decision:** `packages/normalizer` has zero runtime dependencies — no AI provider, no
+  database — and every function returns an explicit `unknown`/`null` result rather than a
+  best guess when a rule doesn't confidently apply (§16: "if not justified, return unknown").
+  Geography resolution (`geography.ts`) is a small in-memory seed list, not a call into the
+  `source_area_alias`/`geo_area` database tables from Phase 1 — this package cannot depend on
+  `packages/database` (ARCHITECTURE's one-way dependency graph) and must stay usable with no
+  I/O, matching `packages/matching`'s existing "pure, dependency-free" precedent.
+  `extractPreferences`'s output is explicitly designed to be handed to Phase 7's AI layer
+  later as a _baseline/fallback structure_ — a deterministic first pass an AI extraction can
+  be validated against or fall back to, per §15's cost-control priority order (deterministic
+  extraction before AI, AI only for what's left unknown).
+- **Reason:** Matches the explicit Phase 2 instruction and the project's general principle
+  (§40) that the system must be honest about uncertainty and never fabricate. Building the
+  deterministic layer properly now, with real coverage and adversarial tests, gives Phase 7's
+  AI layer something concrete to fall back to and cache against rather than starting from
+  nothing.
+- **Alternatives:** A thinner ruleset with AI filling remaining gaps — rejected as premature:
+  it would introduce an AI dependency and cost before the deterministic ceiling is even known,
+  and MASTER_PROMPT explicitly scopes AI to Phase 7.
+- **Consequences:** Some real language is genuinely out of scope for now — e.g. a
+  never-before-seen neighborhood name, or a construction-era description outside `building-
+age.ts`'s recognized patterns — and returns `unknown` rather than an AI-assisted guess.
+  This is intentional and matches the brief, not a gap to silently work around.
+
+---
+
+## ADR-0013 — Jalali↔Gregorian conversion implemented in-house, no date library dependency
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** `jalali.ts` needs accurate Jalali↔Gregorian conversion with correct leap-year
+  handling (MASTER_PROMPT §10). A well-known, widely used, MIT-licensed npm package exists
+  for this (`jalaali-js` and equivalents), implementing the same published Borkowski/
+  Fliegel-Van-Flandern algorithm this module uses.
+- **Decision:** The conversion math is implemented directly in `packages/normalizer`, not
+  pulled in as a dependency. `packages/normalizer` has zero runtime dependencies (ADR-0012);
+  the algorithm itself is well-documented, public-domain astronomical-calendar mathematics
+  (not any one project's proprietary implementation), and reproducing it directly keeps the
+  package's "no dependencies" property intact rather than making an exception for one module.
+- **Reason:** Consistent with §39 (prefer the simplest, most portable option) applied to a
+  package that has deliberately stayed dependency-free everywhere else in this phase — adding
+  one dependency here would be the only exception in the whole package for no strong reason,
+  since the algorithm is compact, standard, and independently testable.
+- **Alternatives:** Depend on `jalaali-js` or similar — reasonable, and worth revisiting if
+  the hand-rolled implementation shows problems in a range this package doesn't yet exercise
+  (dates far outside the ~1200–1500 Jalali / 1821–2121 Gregorian window relevant to a
+  present-day Tehran real-estate platform).
+- **Consequences:** The implementation is verified by round-trip and structural-invariant
+  tests across a wide year range, plus two independently-recalled, publicly documented
+  reference dates (`jalali.test.ts`), rather than by relying on an already-widely-tested
+  library. `jalCal`'s supported domain is Jalali years `[-61, 3178)`; outside that, every
+  public function in the module fails closed (`null`) rather than throwing.

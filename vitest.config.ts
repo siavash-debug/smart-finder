@@ -11,6 +11,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@smart-finder/shared": resolvePath("./packages/shared/src/index.ts"),
+      "@smart-finder/normalizer": resolvePath("./packages/normalizer/src/index.ts"),
       "@smart-finder/database": resolvePath("./packages/database/src/index.ts"),
     },
   },

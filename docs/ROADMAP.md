@@ -63,20 +63,56 @@ and 8 `updated_at` triggers, and all 82 tests pass with 0 skipped — including 
 concurrency, retry/backoff, and all three IDOR-scoping tests. `npm run verify` passes in
 full: format, lint, typecheck, tests, build. Detail in `CHANGELOG.md`.
 
-## Phase 2 — Persian engine ⬜
+## Phase 2 — Persian engine ✅
 
-- ⬜ Character normalization (`ي→ی`, `ك→ک`, ZWNJ, diacritics)
-- ⬜ Digit normalization (Persian, Arabic-Indic, Latin)
-- ⬜ Number parsing including Persian number words (میلیارد، میلیون)
-- ⬜ Currency: Rial → Toman, `bigint` output
-- ⬜ Area parsing (`متر`, `متری`, `m2`, `sqm`)
-- ⬜ Jalali ↔ Gregorian conversion
-- ⬜ Tehran geography model: districts, neighborhoods, aliases
-- ⬜ Deterministic (non-AI) preference extraction from Persian text
-- ⬜ Fixture corpus: 50–100 Persian search sentences
+`packages/normalizer` — deterministic, zero-dependency (ADR-0012): no AI, no database.
 
-**Exit criteria:** normalization unit tests green; deterministic extractor benchmarked against
-the sentence corpus with a recorded accuracy baseline.
+- ✅ Character normalization (`text.ts`): `ي/ى→ی`, `ك→ک`, Heh variants, hamza-Alef variants
+  (madda `آ` deliberately excluded — a real letter, not a typo), zero-width characters
+  (ZWSP/ZWNJ/ZWJ/BOM), Unicode-width whitespace, punctuation. Idempotent (tested directly).
+- ✅ Digit normalization (`digits.ts`): Persian/Arabic-Indic/Latin digits; strict grouped/
+  decimal parsing via `parseDecimalLiteral` (rejects malformed grouping, e.g. `"12,5"`);
+  exact `bigint` scaling (`scaleDecimalToBigInt`) — no floating point, ever.
+- ✅ Persian number words (`number-words.ts`): units, tens, hundreds, هزار/میلیون/میلیارد,
+  one algorithm serving both plain counts ("صد و بیست و پنج") and money's cross-scale
+  compounds ("پنج میلیارد و دویست میلیون").
+- ✅ Money (`money.ts`): total vs. per-square-meter, exact vs. range, approximate flag,
+  Rial→Toman (exact, rejects a non-whole-Toman result), ambiguous-currency rejection when
+  neither an explicit currency nor a scale word is present.
+- ✅ Area (`area.ts`): unit required (`متر`/`متری`/`m`/`m2`/`sqm`) — a bare number is too
+  ambiguous and stays `unknown`; approximate flag; `at_least`/`at_most` comparators.
+- ✅ Rooms (`rooms.ts`): digit and word counts with `خواب`/`خوابه`/`اتاق`/`اتاق خواب`;
+  structurally cannot false-positive on an unrelated number (MASTER_PROMPT's own
+  "۱۲۵ متر، ۲ پارکینگ" example is a direct test case).
+- ✅ Floor (`floor.ts`): numeric, ordinal words, "N از M", and `همکف`/`زیرزمین`/`پنت‌هاوس` as
+  their own category — never mapped to an arbitrary numeric floor, since the schema has no
+  such column to map them onto.
+- ✅ Building age (`building-age.ts`): explicit Jalali year, `نوساز`/`کلیدنخورده`, and
+  relative age (`۵ ساله`) kept as _relative_, not resolved to an absolute year without a
+  reference date.
+- ✅ Boolean attributes (`attributes.ts`): parking/elevator/storage/balcony/pool/guard/lobby/
+  jacuzzi, tri-state (`true`/`false`/`null`=unknown) — absence of a mention is always
+  unknown, never `false`; a bare checklist-style mention defaults to `true`; contradictory
+  mentions resolve to unknown rather than a guess.
+- ✅ Tehran geography (`geography.ts`): a small, explicitly-seeded alias list (not a
+  speculative database) resolving a name to a canonical district/neighborhood identity.
+- ✅ Jalali↔Gregorian conversion (`jalali.ts`, ADR-0013): implemented in-house from the
+  standard Borkowski/Fliegel-Van-Flandern algorithms, verified by round-trip and structural
+  tests across a wide year range plus documented reference dates (Nowruz 1400 and 1403).
+- ✅ Deterministic preference extraction (`preferences.ts`): `extractPreferences(text)`,
+  comma-clause splitting with a windowed sub-parser search so a field embedded in a longer
+  sentence (not its own clause) is still found; explicit `required`/`forbidden`/
+  `no_preference`/`unknown` states for attributes; MASTER_PROMPT's own two worked examples
+  (§12 and §14) are direct test cases.
+- 🔄 Fixture corpus: **not built as a separate 50–100-sentence artifact.** What exists
+  instead is 312 unit tests across all eleven modules, including the exact worked examples
+  from MASTER_PROMPT §12/§14, adversarial false-positive cases (§5's parking/bedroom
+  example), and idempotency/round-trip property tests. This is real coverage, but it is not
+  the discrete evaluation corpus + accuracy-benchmark artifact this line originally
+  described — flagged here rather than marked done, since no such file exists on disk.
+
+**Exit criteria:** normalization unit tests green (312/312, live-verified) — met. A
+benchmarked accuracy baseline against a standalone sentence corpus — **not met**; see above.
 
 ## Phase 3 — Matching ⬜
 
