@@ -24,8 +24,12 @@ export type {
   AppUserRow,
   JobRow,
   JobStatus,
+  NotificationChannel,
+  NotificationRow,
+  NotificationStatus,
   PropertyType,
   SearchProfileRow,
+  TelegramCommandLogRow,
   TransactionType,
 } from "./domain.js";
 
@@ -58,3 +62,22 @@ export {
   replaceActiveSearchProfile,
   type SearchProfileInput,
 } from "./search-profile-repository.js";
+
+export {
+  countNotificationsByStatus,
+  countNotificationsForUserSince,
+  createNotification,
+  getNotificationById,
+  getNotificationByIdempotencyKey,
+  markNotificationFailed,
+  markNotificationSent,
+  markNotificationSuppressed,
+  recordNotificationAttemptFailure,
+  rescheduleNotification,
+  type CreateNotificationInput,
+} from "./notification-repository.js";
+
+export {
+  getRecentCommandTimestamps,
+  recordTelegramCommand,
+} from "./telegram-rate-limit-repository.js";

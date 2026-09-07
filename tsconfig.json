@@ -4,6 +4,7 @@
     { "path": "./packages/shared/tsconfig.build.json" },
     { "path": "./packages/normalizer/tsconfig.build.json" },
     { "path": "./packages/matching/tsconfig.build.json" },
+    { "path": "./packages/telegram/tsconfig.build.json" },
     { "path": "./packages/database/tsconfig.build.json" },
     { "path": "./apps/worker/tsconfig.build.json" }
   ]

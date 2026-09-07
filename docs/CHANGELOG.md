@@ -4,6 +4,117 @@ Meaningful implementation changes, newest first. Dates are UTC.
 
 ---
 
+## 2026-09-07 — Phase 4: Telegram integration
+
+New package: `packages/telegram`, pure — no database dependency, every network call goes
+through an injectable `fetch` so its own tests never touch the real Telegram API (ADR-0007-
+style precedent). Composed by `apps/web` (webhook) and `apps/worker` (notification delivery).
+123 new tests (538 total across the repository, up from 415 after Phase 3, all executed
+live, none skipped).
+
+### A conflict confirmed, not silently touched
+
+Before writing anything Telegram-related, the already-known tier mismatch from Phase 3
+(`match.tier`'s CHECK constraint: `EXACT/STRONG/NEAR/WEAK`, uppercase, vs. `packages/
+matching`'s public API: `exact/strong/near`, lowercase, three values) was checked against
+whether Phase 4 needed to persist a `MatchResult` anywhere. It does not — nothing in this
+phase writes to `match`. Confirmed out of scope and left exactly as Phase 3/ADR-0014 left it;
+documented again in ADR-0015 rather than silently resolved either way.
+
+### Schema
+
+- One new migration, `0003_telegram_rate_limit.sql`: a single table,
+  `telegram_command_log` (`telegram_user_id`, `command`, `created_at`), for the command rate
+  limit. Everything else Phase 4 needed — `app_user.telegram_user_id` (already `UNIQUE`),
+  `auth_session`, `notification` (full `pending/sent/failed/suppressed` state machine,
+  `idempotency_key` already `UNIQUE`), `job` — already existed from Phase 1 and needed no
+  change. Deliberately not reusing `audit_log` for rate-limit bookkeeping: that table's
+  documented purpose is privileged/admin operations, not routine per-message logging.
+
+### `packages/database`
+
+- `notification-repository.ts`: `createNotification` (idempotent — `ON CONFLICT DO NOTHING`
+  plus a follow-up read, so two concurrent callers with the same `idempotency_key` get back
+  the same row), `markNotificationSent`/`markNotificationFailed`/`markNotificationSuppressed`
+  (each a no-op once the row has left `pending` — duplicate delivery is structurally
+  prevented, not just discouraged), `recordNotificationAttemptFailure` (keeps a transient
+  failure `pending` for the job queue to retry), `rescheduleNotification` (quiet-hours
+  deferral — moves `scheduled_for`, changes nothing else).
+- `telegram-rate-limit-repository.ts`: `recordTelegramCommand`, `getRecentCommandTimestamps`.
+
+### `packages/telegram`
+
+- `client.ts` — `TelegramClient`: `sendMessage`, `answerCallbackQuery`. Every failure is
+  classified `transient` (network error, timeout, 429, 5xx — worth retrying),
+  `permanent` (other 4xx — e.g. the user blocked the bot — not worth retrying), or
+  `malformed_response`. The bot token appears only in the request URL, never in a logged or
+  thrown value — verified directly by a test that asserts the token is absent from every
+  error message and from the captured request body.
+- `webhook-secret.ts` — `verifyWebhookSecret`: `node:crypto`'s `timingSafeEqual`, not `===`,
+  so a wrong secret's response time doesn't leak how many leading characters matched.
+- `types.ts` — a minimal structural `isTelegramUpdate` guard (not a full Telegram SDK): only
+  the fields this bot reads, rejecting anything malformed without throwing.
+- `commands.ts` — deterministic `/start`/`/help`/`/status` parsing (case-insensitive, strips
+  a `@botusername` suffix); anything else with a leading `/` is `unknown_command`, anything
+  without one is plain `text`.
+- `messages.ts` — every user-facing string, centralized, Persian. `preferenceSummaryMessage`
+  lists only the fields actually extracted — never fabricates an unstated one.
+- `rate-limit.ts` — `checkRateLimit`, a pure sliding-window decision over caller-supplied
+  timestamps (no Redis, no external service).
+- `quiet-hours.ts` — fixed policy, 23:00–08:00 Asia/Tehran (ADR-0015), computed via
+  `Intl.DateTimeFormat` rather than a hard-coded UTC+03:30 offset, even though that
+  happens to be Tehran's current fixed offset — the logic itself doesn't assume it.
+
+### `apps/web`
+
+- `POST /api/telegram/webhook`: verifies the secret-token header before the body is even
+  read, then the update's shape, both failing closed (401/400) with a generic response —
+  never echoing the secret, never logging the raw payload.
+- `lib/telegram/handle-update.ts`: the orchestration — identity resolution (always from the
+  update's own `from.id`, Telegram-authenticated server-side; never a client-supplied value),
+  command routing, the free-text preference-extraction interaction (`extractPreferences` →
+  Persian summary + `تأیید`/`ویرایش` buttons carrying no identifying data → saved eagerly via
+  the existing `replaceActiveSearchProfile`, since the schema has no draft state and
+  `callback_data`'s 64-byte cap can't carry the structure back on confirm — ADR-0015),
+  callback-query handling (unrecognized `callback_data` gets a rejection reply, not a crash).
+
+### `apps/worker`
+
+- `telegram-notification-handler.ts` — the `send_telegram_notification` job handler: claimed
+  via the existing `job` table, not by polling `notification` directly (`notification.
+status` has no `processing` value in its CHECK constraint, so there's no race-safe way to
+  claim a row that way — `job` already solves this, tested since Phase 1; ADR-0015). Throws
+  on a transient send failure (the job's own retry/backoff takes it from there); resolves
+  normally on success, a permanent failure (terminally marks the notification `failed`), or a
+  quiet-hours deferral (reschedules the notification, enqueues a fresh job at the deferred
+  time, retries nothing).
+
+### Tests
+
+123 new tests covering every category the phase's instructions named: identity (first
+`/start` creates one user; repeated and 5-way-concurrent `/start` are idempotent — verified
+by a direct row-count query, not just by inspecting return values; a username change on a
+later `/start` does not create another identity), security (wrong/missing webhook secret,
+malformed JSON, a malformed update shape, an unrecognized callback payload, attacker-
+controlled message text proven unable to alter a different user's profile), commands (all
+three plus unknown), the full notification lifecycle end-to-end against a real job
+(`enqueue → claim → handle → sent`, pending→sent, pending→failed terminal, transient-failure
+retry-throw, idempotent duplicate-delivery prevention — a second handler call for an
+already-sent notification never calls the Telegram API again — and quiet-hours deferral),
+Telegram API client failure classification (transient/permanent/malformed/timeout), and rate
+limiting (a legitimate request always succeeds; repeated rapid requests eventually stop).
+
+### Verification
+
+`npx vitest run`: **538 tests, 538 passed, 0 skipped** (25 Phase 1 integration tests plus all
+of Phase 4's own database-backed tests, executed live against PostgreSQL). `npm run verify`
+passes in full: format, lint, typecheck, tests, build (the build output now lists
+`ƒ /api/telegram/webhook` alongside the existing routes).
+
+Live Telegram delivery was not exercised — no real bot token or webhook were available in
+this session. Every Telegram-API-touching test runs against `TelegramClient`'s injectable
+`fetch`, not the real network; this is stated plainly rather than implied otherwise.
+
 ## 2026-09-07 — Phase 3: deterministic matching engine
 
 New package: `packages/matching`, pure and dependency-free — no database, network, LLM, or

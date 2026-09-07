@@ -15,28 +15,33 @@ a set of libraries, and nothing else. Neither imports the other (ADR-0004).
                     │                                             │
    User ──▶ Cloudflare ──▶ Next.js (apps/web) ──┐                 │
    (Persian, RTL)   │      App Router            │                │
-                    └────────────────────────────┼────────────────┘
-                                                 │
-                                                 ▼
-                                    ┌────────────────────────┐
-                                    │   PostgreSQL 16+       │
-                                    │   pg_trgm · postgis    │
-                                    │   + job queue table    │
-                                    └────────────────────────┘
-                                                 ▲
-                    ┌────────────────────────────┼────────────────┐
-                    │                            │                │
-                    │   Worker (apps/worker) ────┘                │
-                    │   long-running Node process                 │
-                    │                                             │
-                    └──────────────── INGEST PLANE ───────────────┘
-                                      │
-                                      ▼
-                              Telegram Bot API
+                    │  ▲ webhook   sync reply ▼   │                │
+                    └──┼────────────┼─────────────┼────────────────┘
+                       │            │             │
+                Telegram Bot API ◀──┘             ▼
+                (Phase 4)              ┌────────────────────────┐
+                       ▲               │   PostgreSQL 16+       │
+                       │               │   pg_trgm · postgis    │
+                       │ notification  │   + job queue table    │
+                       │ delivery      └────────────────────────┘
+                    ┌──┼──────────────────────────┼────────────────┐
+                    │                              │                │
+                    │   Worker (apps/worker) ──────┘                │
+                    │   long-running Node process                   │
+                    │                                               │
+                    └──────────────── INGEST PLANE ─────────────────┘
 ```
 
 The worker never depends on an HTTP request staying alive. Both planes are independently
 restartable and independently deployable.
+
+Telegram talks to both planes, for two different reasons (ADR-0015). `apps/web`'s webhook
+endpoint receives every Telegram update and replies synchronously in the same request for
+fast, conversational interactions — bot commands, the preference-summary confirmation flow.
+`apps/worker` sends notifications asynchronously, via the same `job` table every other
+background task uses — for anything not tied to a live incoming request (a future match
+alert). Neither plane runs a persistent connection to Telegram; every call is a bounded HTTP
+request through `packages/telegram`'s client.
 
 ## 2. Ingest pipeline
 
@@ -79,7 +84,8 @@ smart-finder/
 │   ├── normalizer/          Persian text/digit/money/area/rooms/floor/age/attribute/geography
 │   │                        parsing, Jalali calendar, deterministic preference extraction
 │   ├── matching/            pure deterministic scoring — score(listing, profile), zero deps
-│   ├── telegram/            (Phase 4) bot client, login-signature verification
+│   ├── telegram/            bot client, webhook-secret verification, command parsing,
+│   │                        Persian message templates, rate-limit + quiet-hours logic
 │   ├── scraper/             (Phase 5) SourceAdapter interface + per-source adapters
 │   └── ai/                  (Phase 7) provider abstraction, schema-constrained extraction
 ├── infrastructure/docker/   Dockerfiles, compose, Postgres init
@@ -96,12 +102,14 @@ apps/worker┘                              ▲
                                           │
            packages/matching ─────────────┘  (types only; no runtime deps)
            packages/normalizer ───────────┘  (types only; no runtime deps)
+           packages/telegram ─────────────┘  (types only; no runtime deps)
 ```
 
 `packages/normalizer` has no dependency on `database`, `shared`, or any other package — it is
-pure, deterministic, and has no AI dependency (ADR-0012). It is not yet wired into `apps/web`
-or `apps/worker`; the search-profile creation flow (Phase 8 UI) and the collector's attribute
-extraction (Phase 5) are its first real consumers.
+pure, deterministic, and has no AI dependency (ADR-0012). `packages/normalizer` is used by
+`apps/web`'s webhook handler as of Phase 4, for the deterministic preference-extraction
+interaction; the collector's attribute extraction (Phase 5) is a second consumer still to
+come.
 
 `packages/matching` is likewise pure and dependency-free (ADR-0007, ADR-0014): no database,
 network, or LLM access, synchronous, and never reads the clock. Its public entry point is
@@ -109,6 +117,13 @@ network, or LLM access, synchronous, and never reads the clock. Its public entry
 not yet wired into `apps/worker`'s match fan-out (see §2 above) — that wiring, plus the
 candidate-profile indexed query and `match` table persistence, is Phase 6+ territory; Phase 3
 delivers the pure scorer those later phases call.
+
+`packages/telegram` is also pure and dependency-free: no database, and every network call
+(Bot API requests) goes through an injectable `fetch`, so its own tests never touch a real
+network (ADR-0007-style precedent). `apps/web` and `apps/worker` both compose it with
+`@smart-finder/database` and, for the preference-extraction interaction, `@smart-finder/
+normalizer` — the composition itself lives in `apps/web/src/lib/telegram/` and `apps/worker/
+src/telegram-notification-handler.ts`, not inside `packages/telegram` (§13).
 
 `packages/*` must never import from `apps/*`, and must never import `next/*` — they run in
 both planes.
@@ -219,3 +234,40 @@ critical paths, and they are written as explicit indexed SQL.
   session is issued.
 - Scheduled/administrative endpoints require an authenticated caller.
 - Seller phone numbers are not stored (MASTER_PROMPT §23).
+
+## 11. Telegram integration (Phase 4)
+
+- **Identity.** The Telegram numeric user id (`update.message.from.id` /
+  `update.callback_query.from.id`) is the only identity ever used — never username, display
+  name, or first/last name (those change; the numeric id doesn't). It maps to `app_user.
+telegram_user_id` (`bigint`, `UNIQUE`, Phase 1 schema) via `findOrCreateUserByTelegramId`,
+  a single `INSERT ... ON CONFLICT`, so repeated or concurrent `/start` calls never create a
+  duplicate `app_user` — the database's own unique constraint is what makes this safe, not
+  application-level locking.
+- **Webhook.** `apps/web`'s `POST /api/telegram/webhook` verifies the
+  `X-Telegram-Bot-Api-Secret-Token` header (constant-time compare, `packages/telegram`'s
+  `verifyWebhookSecret`) before parsing the body at all, then validates the update's shape
+  (`isTelegramUpdate`) before touching the database. Both checks fail closed (401 / 400) with
+  a generic message — never echoing the received value, never distinguishing failure reasons
+  in a way that would help an attacker calibrate.
+- **Synchronous vs. asynchronous.** Bot command replies and the preference-summary
+  interaction are bounded (one or two DB queries, one Telegram API call) and answered
+  synchronously inside the webhook request. Anything not tied to a live request — a future
+  match alert — goes through `notification` + the `job` table, claimed and retried by
+  `apps/worker`'s `send_telegram_notification` handler (ADR-0015 for why `job`, not a direct
+  poll of `notification`).
+- **Notification state machine.** Unchanged from the Phase 1 schema:
+  `pending → sent | failed | suppressed`. Idempotency is `notification.idempotency_key`
+  (`UNIQUE`); retry/backoff is entirely the existing `job` table's, not a second mechanism.
+  Quiet hours (23:00–08:00 Asia/Tehran, fixed policy — ADR-0015) defer by moving
+  `scheduled_for` forward and enqueueing a fresh job, never by retrying the original one.
+- **Rate limiting.** Two independent, deterministic sliding-window checks (`packages/
+telegram`'s `checkRateLimit`, pure): command processing per Telegram user id (backed by the
+  new `telegram_command_log` table, migration `0003_telegram_rate_limit.sql`), and
+  notification creation per `app_user` (backed by counting existing `notification` rows —
+  no new table needed there).
+- **Known limitation.** `match.tier`'s CHECK constraint (`'EXACT' | 'STRONG' | 'NEAR' |
+'WEAK'`, uppercase) does not match `packages/matching`'s public `MatchTier` (`"exact" |
+"strong" | "near"`, lowercase, three values) — a conflict identified and resolved with the
+  user before Phase 4 touched anything (see ADR-0014's "known gaps" and ADR-0015). Not
+  Phase 4's to fix: nothing in this phase persists a `MatchResult` into `match`.

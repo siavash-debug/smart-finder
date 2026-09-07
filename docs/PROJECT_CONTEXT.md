@@ -2,7 +2,7 @@
 
 Current state of the project. Updated at the end of every meaningful task.
 
-**Last updated:** 2026-09-07 · **Phase:** 3 (Matching) — verified complete
+**Last updated:** 2026-09-07 · **Phase:** 4 (Telegram) — verified complete
 
 ---
 
@@ -128,6 +128,49 @@ detail in `ROADMAP.md`'s Phase 3 section and `CHANGELOG.md`. Summary:
   instructions asked for comprehensive tests, delivered in depth, but not that specific
   artifact). Flagged as open rather than silently marked done.
 
+**Phase 4 — Telegram. Verified complete** — `packages/telegram` (pure, no database; every
+network call goes through an injectable `fetch`), composed by `apps/web` (webhook) and
+`apps/worker` (notification delivery). Full detail in `ROADMAP.md`'s Phase 4 section and
+`CHANGELOG.md`. Summary:
+
+- New migration `0003_telegram_rate_limit.sql` — one table, `telegram_command_log`, for the
+  command rate limit. Everything else Phase 4 needed (`app_user.telegram_user_id`,
+  `auth_session`, `notification`, `job`) already existed from Phase 1 — inspected first,
+  reused as-is, no other schema change.
+- Identity: Telegram's numeric user id only, never username/display name. `/start` is
+  idempotent under both repeat and concurrency — verified directly (5 concurrent `/start`
+  calls for the same Telegram id produce exactly one `app_user` row), enforced by
+  `app_user.telegram_user_id`'s existing `UNIQUE` constraint plus the existing
+  `findOrCreateUserByTelegramId`'s single `INSERT ... ON CONFLICT`.
+- Webhook (`POST /api/telegram/webhook`): constant-time secret-token verification before the
+  body is parsed, then update-shape validation — both fail closed (401/400), generic
+  response, secret never echoed.
+- Commands `/start`/`/help`/`/status` plus an unknown-command reply; a deterministic (no AI)
+  preference-extraction interaction reusing Phase 2's `extractPreferences` directly.
+- Notification delivery reuses the Phase 1 `job` table for claim/retry/backoff rather than
+  polling `notification` directly — `notification.status` has no `processing` value in its
+  CHECK constraint, so a direct poll can't be claimed race-safely the way `job` already is
+  (ADR-0015). Quiet hours (23:00–08:00 Asia/Tehran, fixed policy, `Intl`-computed offset) and
+  two independent rate limits (commands per Telegram user; notification creation per user)
+  are all deterministic and unit-tested.
+- **A real, already-locked conflict was found and resolved with the user before any related
+  code was written**: `match.tier`'s CHECK constraint (`EXACT/STRONG/NEAR/WEAK`, uppercase)
+  doesn't match `packages/matching`'s public API (`exact/strong/near`, lowercase, three
+  values — Phase 3, ADR-0014). Confirmed out of scope for Phase 4 (nothing here persists a
+  `MatchResult`) and left untouched, per the explicit instruction not to invent a mapping or
+  migration without approval.
+- 123 new tests (538 total repo-wide, up from 415 after Phase 3, all executed live, 0
+  skipped), covering every category the phase's instructions named: identity
+  (idempotent/concurrent `/start`, username-change safety), security (bad webhook secret,
+  malformed update, invalid callback, attacker text cannot alter another user's profile),
+  commands, the full notification lifecycle (pending→sent, pending→failed terminal, transient
+  retry, idempotent duplicate-delivery prevention, quiet-hours deferral), Telegram API client
+  failure classification (transient/permanent/malformed/timeout), and rate limiting.
+- **Not built:** a browser-based Telegram Login Widget / `auth_session` issuance — an older
+  `ROADMAP.md` line from Phase 0, superseded by this session's actual Phase 4 instructions,
+  which scope the phase entirely to the bot webhook flow. `auth_session` is unused so far,
+  exactly as Phase 1 left it. Flagged as open, not silently built or silently dropped.
+
 ## What is currently broken or unverified?
 
 - **Resolved — Phase 1's integration tests have now been run against a live database.**
@@ -176,14 +219,21 @@ specified`). The 25 integration tests self-skipped rather than failing, and Phas
   is modeled as a relative-years range, not the absolute Jalali construction year
   `MASTER_PROMPT` §19's examples assume; (3) floor categories have no database column to
   persist to.
+- `packages/telegram` powers the bot flow only; a browser-based Telegram Login Widget and
+  `auth_session` issuance were not built (superseded ROADMAP line from Phase 0 — see the
+  Phase 4 summary above). `auth_session` remains unused, exactly as Phase 1 left it.
+- Notification delivery has only one real template exercised end-to-end
+  (`telegram_welcome`) — no match-alert trigger exists yet (Phase 6+ fan-out is what would
+  create one). `createSendTelegramNotificationHandler`'s `renderNotificationText` falls back
+  to a generic placeholder for any other template rather than fabricating content.
 - No listings are collected and search is not available — expected this early.
 
 ## What is the next step?
 
-Awaiting explicit go-ahead — the user's Phase 3 instructions say not to start Phase 4 without
-it. When it comes, Phase 4 is Telegram: bot client and Persian message templates, login-widget
-HMAC verification, the notification state machine (`pending`→`sent`/`failed`/`suppressed`)
-with idempotency, retries, and quiet hours.
+Awaiting explicit go-ahead — the user's instructions say not to start Phase 5 without it.
+When it comes, Phase 5 is source ingestion: a compliance check first (robots.txt, terms,
+access constraints for Divar), then a `SourceAdapter` interface and a Divar adapter with low
+concurrency, backoff, and a circuit breaker.
 
 ## What decisions are locked?
 
@@ -210,6 +260,15 @@ explicit user approval (MASTER_PROMPT §43):
   specific field, or the tier thresholds, needs explicit user approval same as any other
   locked decision, even though it isn't verbatim `MASTER_PROMPT` text — it was established
   precisely because `MASTER_PROMPT` left it to this phase to decide conservatively.
+- `packages/matching`'s three-lowercase-tier scope (`exact`/`strong`/`near`) stays as decided
+  in Phase 3 — Phase 4 confirmed this again rather than touching it (ADR-0015). The
+  `match.tier` CHECK constraint / `MASTER_PROMPT.md` §10's four-uppercase-tier mismatch is
+  still open; resolving it (a mapping, a migration, or an amendment to `MASTER_PROMPT.md`)
+  needs the user's explicit choice, not an implementation guess.
+- Notification delivery is claimed via the `job` table, never by polling `notification`
+  directly; quiet hours are a fixed 23:00–08:00 Asia/Tehran policy, the same for every user
+  (ADR-0015). Changing either — e.g. adding a `processing` value to `notification.status`, or
+  a per-user quiet-hours preference — is a schema change and needs explicit approval first.
 
 Reversible engineering choices, changeable without approval: npm workspaces (ADR-0001),
 TypeScript 5.9 (ADR-0002), lazy package creation (ADR-0008), Node 24 LTS in containers

@@ -157,16 +157,57 @@ No numeric percentage exposed anywhere in the public contract (`total` is a plai
 integer, never formatted as a percentage) — met. Indexed candidate-profile query and the
 200-listing fixture corpus — not built; see above, tracked as open in `PROJECT_CONTEXT.md`.
 
-## Phase 4 — Telegram ⬜
+## Phase 4 — Telegram ✅
 
-- ⬜ Bot client and message templates (Persian)
-- ⬜ Login-widget HMAC verification and `auth_date` bound
-- ⬜ Session issuance
-- ⬜ `notification` state machine with idempotency key
-- ⬜ Retry, per-user caps, quiet hours, suppression
-- ⬜ Tests: signature verification, idempotency under duplicate job execution
+`packages/telegram` — pure (no database; every network call goes through an injectable
+`fetch`) — composed by `apps/web` (webhook) and `apps/worker` (notification delivery).
 
-**Exit criteria:** a retried notification job provably sends at most once.
+- ✅ Bot client (`client.ts`): typed `sendMessage`/`answerCallbackQuery`, bounded timeout,
+  classifies every failure as `transient`/`permanent`/`malformed_response`; the bot token
+  never appears in a request body or a thrown error message.
+- ✅ Message templates (Persian, centralized in `messages.ts`) — no business logic hard-coded
+  into a string.
+- ✅ Webhook endpoint (`apps/web`'s `POST /api/telegram/webhook`): constant-time secret-token
+  verification before the body is even parsed, then update-shape validation, both failing
+  closed with a generic response.
+- ✅ Commands: `/start` (idempotent identity linking via the existing `findOrCreateUserByTelegramId`
+  — concurrent calls provably cannot duplicate an `app_user`, enforced by `app_user.
+telegram_user_id`'s `UNIQUE` constraint), `/help`, `/status`, and an explicit
+  unknown-command reply.
+- ✅ Deterministic preference-extraction interaction: free text → `@smart-finder/normalizer`'s
+  `extractPreferences` (no AI) → a structured Persian summary + `تأیید`/`ویرایش` inline
+  buttons carrying no identifying data at all (ADR-0015 explains why, and why confirmation is
+  eager-save rather than a held draft — the schema has no draft state, and Telegram's
+  64-byte `callback_data` cap can't carry the structure back anyway).
+- ✅ `notification` state machine — unchanged Phase 1 schema
+  (`pending → sent | failed | suppressed`), `idempotency_key` `UNIQUE`. Delivery is claimed
+  and retried via the existing `job` table, not a new mechanism (ADR-0015).
+- ✅ Retry: transient Telegram failures throw and let the `job` table's existing backoff
+  (Phase 1, unchanged) retry; permanent failures (e.g. the user blocked the bot) terminally
+  fail the notification without retrying.
+- ✅ Quiet hours: fixed policy, 23:00–08:00 Asia/Tehran, computed via `Intl.DateTimeFormat`
+  (not a hard-coded offset) — deferred notifications stay `pending` with `scheduled_for`
+  moved forward and a fresh job enqueued, never a retry of the original.
+- ✅ Rate limiting: command processing per Telegram user id (new `telegram_command_log`
+  table, migration `0003_telegram_rate_limit.sql`) and notification creation per user
+  (reuses the existing `notification` table — no new table needed there); both deterministic
+  sliding-window checks, pure and unit-tested.
+- ✅ A real, already-locked conflict was found and resolved with the user _before_ any tier-
+  related code was touched: `match.tier`'s CHECK constraint names four uppercase tiers,
+  `packages/matching`'s public API has three lowercase ones (Phase 3, ADR-0014). Confirmed
+  out of scope for Phase 4 — nothing here persists a `MatchResult`. Documented again in
+  ADR-0015 rather than silently touched.
+- 🔄 **Not built:** a browser-based Telegram Login Widget / `auth_session` issuance. This
+  ROADMAP line was written speculatively in Phase 0, before this session's actual Phase 4
+  instructions arrived, which scope Phase 4 entirely to the bot webhook flow — a Telegram
+  webhook update is already self-authenticating per-message (Telegram sets `from.id`
+  server-side; the webhook secret proves the request came from Telegram's servers), so the
+  bot flow never needed a browser session at all. `auth_session` remains exactly as Phase 1
+  left it, unused so far; a future browser sign-in flow is the first real consumer.
+
+**Exit criteria:** a retried notification job provably sends at most once — verified directly
+(`telegram-notification-handler.integration.test.ts`'s idempotency test creates a
+notification, runs the handler twice, and asserts the Telegram API was called exactly once).
 
 ## Phase 5 — Source ingestion ⬜
 

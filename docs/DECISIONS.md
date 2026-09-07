@@ -363,3 +363,73 @@ age.ts`'s recognized patterns — and returns `unknown` rather than an AI-assist
   every field it reads has a real column behind it (`floorCategory` aside, which is
   explicitly documented as schema-less). The four gaps above are structural, not oversights;
   each is fixable by a future schema change without touching this package's evaluation logic.
+
+---
+
+## ADR-0015 — Telegram integration: notification delivery, quiet hours, preference confirmation
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** Phase 4 adds `packages/telegram` (pure — bot client, webhook-secret
+  verification, command parsing, message templates, rate-limit and quiet-hours logic) and
+  wires it into `apps/web` (webhook) and `apps/worker` (notification delivery). Four concrete
+  design points had no existing precedent in the locked schema/architecture and needed a
+  documented decision rather than an implicit one:
+  1. **Notification delivery is claimed via the `job` table, not by polling `notification`
+     directly**, even though `notification` (migration `0002_core_schema.sql`) already has a
+     `scheduled_for` column and an index literally commented "Worker claim query: due, still-
+     pending notifications." That index's plan doesn't work safely: `notification.status`'s
+     CHECK constraint only allows `pending`/`sent`/`failed`/`suppressed` — no `processing`
+     value — so there is no atomic way to claim a row the way `job.status` does (claim flips
+     to `processing`, only that claimer proceeds). The `job` table already solves exactly this
+     (`SELECT ... FOR UPDATE SKIP LOCKED` then an atomic status flip, tested since Phase 1).
+     **Decision:** a `notification` row is created eagerly (the durable, user-facing record of
+     what was attempted and its outcome), and a `job` row (`job_type =
+'send_telegram_notification'`, `payload.notificationId`) is the thing actually claimed
+     and retried. No migration was needed or made; `idx_notification_pending_due` remains in
+     the schema, just unused by the claim path — a future direct-poll design could still use
+     it if `notification.status` ever gained a `processing` value, but that is not this
+     decision to make.
+  2. **Quiet hours are a fixed, single, undocumented-until-now policy: 23:00-08:00 Asia/
+     Tehran, the same for every user.** The schema has no per-user timezone or quiet-hours
+     column. Rather than add one (a real schema change, out of this phase's authority to
+     decide unilaterally), the policy is hard-coded in `packages/telegram/quiet-hours.ts`,
+     computed via `Intl.DateTimeFormat` (not a hard-coded UTC+03:30 offset, even though that
+     is Tehran's actual fixed offset today), so the logic itself doesn't assume a specific
+     offset even though it currently is one. A quiet-hours-deferred notification stays
+     `pending` with `scheduled_for` moved forward, and a fresh `job` is enqueued at that time
+     — not a retry of the original job, since deferral is not a failure.
+  3. **Preference confirmation via Telegram's inline keyboard is saved eagerly, not held as a
+     pending draft.** MASTER_PROMPT-adjacent Phase 4 §12's example flow shows "تأیید
+     می‌کنید؟" gating a save. Two real constraints rule that out as literally specified: the
+     schema has no draft/pending-confirmation state on `search_profile`, and Telegram's
+     `callback_data` is capped at 64 bytes — nowhere near enough to carry the extracted
+     preference structure back on confirm. **Decision:** free text is parsed with
+     `extractPreferences` (deterministic, Phase 2, no AI) and saved immediately via the
+     already-existing `replaceActiveSearchProfile` (Phase 1, which already archives the
+     previous active profile to `search_profile_history`). The `تأیید`/`ویرایش` buttons carry
+     no data at all beyond a fixed `pref:ack`/`pref:edit` string — confirming is an
+     acknowledgment, editing means "send corrected criteria, which replaces this the same
+     way." This is a genuine simplification from the literal example flow, not a hidden one.
+  4. **Callback buttons carry no identifying data.** MASTER_PROMPT-adjacent Phase 4 §23 warns
+     against encoding sensitive data into `callback_data` and against trusting it without
+     validation. Since confirming/editing only ever act on "whichever user tapped the button"
+     (resolved fresh from `callback_query.from.id`, which Telegram itself sets server-side —
+     never a client-supplied value), there is no user or profile identifier in the callback
+     payload for an attacker to substitute in the first place; the two fixed strings are
+     matched against an allow-list, anything else gets a rejection reply.
+- **Reason:** Every one of these reuses existing, already-tested infrastructure
+  (`job`/`search_profile_history`) instead of adding new schema or a new retry mechanism, per
+  MASTER_PROMPT §39 (prefer the simplest, most portable, most reversible option) and this
+  phase's own "do not create duplicate competing state machines" instruction.
+- **Alternatives considered:** A `processing` value added to `notification.status` via a new
+  migration, enabling direct polling — rejected as an unnecessary schema change when the `job`
+  table already does this safely. A per-user quiet-hours preference column — rejected as
+  exactly the kind of schema invention this phase was told to avoid; documented as a
+  reasonable future addition instead. A short-lived server-side draft table for preference
+  confirmation — rejected as more machinery than "establish the interaction pattern" (the
+  phase's own framing) requires.
+- **Consequences:** A notification's row and its owning job can, in principle, drift apart
+  (e.g. a job manually deleted) — acceptable at MVP scale, and `getNotificationById` finding
+  nothing simply short-circuits the handler. Quiet hours are not user-configurable yet. A
+  buyer's confirmation tap has no undo beyond resending corrected text.

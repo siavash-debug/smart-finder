@@ -11,7 +11,9 @@
   "dependencies": {
     "@fontsource-variable/vazirmatn": "^5.3.0",
     "@smart-finder/database": "*",
+    "@smart-finder/normalizer": "*",
     "@smart-finder/shared": "*",
+    "@smart-finder/telegram": "*",
     "next": "^16.3.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

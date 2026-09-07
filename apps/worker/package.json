@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "@smart-finder/database": "*",
-    "@smart-finder/shared": "*"
+    "@smart-finder/shared": "*",
+    "@smart-finder/telegram": "*"
   },
   "devDependencies": {
     "tsx": "^4.23.13"

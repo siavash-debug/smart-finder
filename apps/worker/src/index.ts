@@ -3,10 +3,10 @@
  *
  * A long-running process, not a request handler: it owns its own lifetime and must survive
  * transient dependency failures rather than exiting. Phase 0 wired the skeleton; Phase 1 wires
- * the poll loop to the real `job` table via `createJobPollTick`.
+ * the poll loop to the real `job` table via `createJobPollTick`; Phase 4 registers the first
+ * real handler, `send_telegram_notification`.
  *
- * The handler registry is empty — no job producer exists yet (the collector arrives in
- * Phase 5). A claimed job with no matching handler fails loudly rather than being silently
+ * A claimed job whose type has no registered handler fails loudly rather than being silently
  * dropped; see `job-dispatcher.ts`.
  */
 
@@ -16,9 +16,12 @@ import { createLogger, loadWorkerEnv, type ComponentHealth } from "@smart-finder
 import { startHealthServer } from "./health-server.js";
 import { createJobPollTick, type JobHandlerRegistry } from "./job-dispatcher.js";
 import { runPollLoop } from "./poll-loop.js";
+import { createWorkerTelegramClient } from "./telegram-client.js";
+import {
+  createSendTelegramNotificationHandler,
+  SEND_TELEGRAM_NOTIFICATION_JOB_TYPE,
+} from "./telegram-notification-handler.js";
 import { WORKER_VERSION } from "./version.js";
-
-const JOB_HANDLERS: JobHandlerRegistry = {};
 
 async function main(): Promise<void> {
   const env = loadWorkerEnv();
@@ -35,6 +38,14 @@ async function main(): Promise<void> {
   });
 
   const pool = createPool({ env, logger, applicationName: "smart-finder-worker" });
+  const telegramClient = createWorkerTelegramClient(env);
+
+  const JOB_HANDLERS: JobHandlerRegistry = {
+    [SEND_TELEGRAM_NOTIFICATION_JOB_TYPE]: createSendTelegramNotificationHandler({
+      pool,
+      telegramClient,
+    }),
+  };
 
   const probes = async (): Promise<ComponentHealth[]> => [await checkDatabaseHealth(pool)];
 

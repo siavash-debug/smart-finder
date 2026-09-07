@@ -9,12 +9,33 @@ const resolvePath = (relative: string) => fileURLToPath(new URL(relative, import
  */
 export default defineConfig({
   resolve: {
-    alias: {
-      "@smart-finder/shared": resolvePath("./packages/shared/src/index.ts"),
-      "@smart-finder/normalizer": resolvePath("./packages/normalizer/src/index.ts"),
-      "@smart-finder/matching": resolvePath("./packages/matching/src/index.ts"),
-      "@smart-finder/database": resolvePath("./packages/database/src/index.ts"),
-    },
+    alias: [
+      { find: "@smart-finder/shared", replacement: resolvePath("./packages/shared/src/index.ts") },
+      {
+        find: "@smart-finder/normalizer",
+        replacement: resolvePath("./packages/normalizer/src/index.ts"),
+      },
+      {
+        find: "@smart-finder/matching",
+        replacement: resolvePath("./packages/matching/src/index.ts"),
+      },
+      {
+        find: "@smart-finder/telegram",
+        replacement: resolvePath("./packages/telegram/src/index.ts"),
+      },
+      {
+        find: "@smart-finder/database",
+        replacement: resolvePath("./packages/database/src/index.ts"),
+      },
+      // See apps/web/src/lib/test-support/server-only-stub.ts for why.
+      {
+        find: "server-only",
+        replacement: resolvePath("./apps/web/src/lib/test-support/server-only-stub.ts"),
+      },
+      // Next.js resolves apps/web's own "@/*" path alias (apps/web/tsconfig.json) via its
+      // bundler; Vitest doesn't read that config, so it needs the same mapping here too.
+      { find: /^@\//, replacement: `${resolvePath("./apps/web/src")}/` },
+    ],
   },
   test: {
     environment: "node",

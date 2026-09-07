@@ -1,14 +1,15 @@
 /**
- * Row shapes for the tables introduced in migration 0002 that already have a repository.
+ * Row shapes for the tables that have a repository.
  *
  * Fields are named exactly as their columns — this package deliberately has no ORM and no
  * camelCase mapping layer (ARCHITECTURE §9), so a row type is just the table read straight
  * through. `bigint` fields come back as `bigint` because of the `int8` type parser installed
  * in `pool.ts` (ADR-0005).
  *
- * Only `app_user`, `search_profile`, and `job` have repositories so far. The remaining
- * entities from MASTER_PROMPT §8 get theirs when the phase that first consumes them arrives
- * (ADR-0011), same reasoning as the package layout in ADR-0008.
+ * `app_user`, `search_profile`, `job` (Phase 1), and now `notification` and
+ * `telegram_command_log` (Phase 4) have repositories. The remaining entities from
+ * MASTER_PROMPT §8 get theirs when the phase that first consumes them arrives (ADR-0011),
+ * same reasoning as the package layout in ADR-0008.
  */
 
 export interface AppUserRow {
@@ -75,4 +76,32 @@ export interface JobRow {
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
+}
+
+export type NotificationChannel = "telegram";
+export type NotificationStatus = "pending" | "sent" | "failed" | "suppressed";
+
+export interface NotificationRow {
+  id: string;
+  user_id: string;
+  match_id: string | null;
+  posting_id: string | null;
+  channel: NotificationChannel;
+  template: string;
+  payload: Record<string, unknown>;
+  idempotency_key: string;
+  status: NotificationStatus;
+  attempts: number;
+  last_error: string | null;
+  scheduled_for: Date;
+  sent_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface TelegramCommandLogRow {
+  id: string;
+  telegram_user_id: bigint;
+  command: string;
+  created_at: Date;
 }

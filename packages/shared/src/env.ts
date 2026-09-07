@@ -37,14 +37,45 @@ const databaseSchema = z.object({
   DATABASE_SSL: envBoolean.default(false),
 });
 
+/**
+ * Bot token issued by @BotFather: `<numeric bot id>:<35-char secret>`. Validated loosely
+ * (length + shape) rather than an exact character-class match — Telegram's own format has
+ * drifted slightly over time and this only needs to catch "clearly not a token" typos.
+ */
+const telegramBotToken = z
+  .string()
+  .min(1)
+  .refine(
+    (value) => /^\d+:[A-Za-z0-9_-]{30,}$/.test(value),
+    "must look like a Telegram bot token (digits:secret)",
+  );
+
+/** Telegram's own constraint on the webhook secret token header: 1-256 chars, `A-Z a-z 0-9 _ -`. */
+const telegramWebhookSecret = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((value) => /^[A-Za-z0-9_-]+$/.test(value), "must contain only A-Z, a-z, 0-9, _, -");
+
+const telegramSchema = z.object({
+  TELEGRAM_BOT_TOKEN: telegramBotToken,
+  TELEGRAM_WEBHOOK_SECRET: telegramWebhookSecret,
+});
+
+export type TelegramEnv = z.infer<typeof telegramSchema>;
+
 const webSchema = baseSchema.extend({
   ...databaseSchema.shape,
+  ...telegramSchema.shape,
   PORT: envInt(1, 65_535).default(3000),
   APP_URL: z.url().default("http://localhost:3000"),
 });
 
 const workerSchema = baseSchema.extend({
   ...databaseSchema.shape,
+  // The worker only ever sends messages (never verifies an inbound webhook), so it needs the
+  // bot token but not the webhook secret.
+  TELEGRAM_BOT_TOKEN: telegramBotToken,
   WORKER_HEALTH_PORT: envInt(1, 65_535).default(3001),
   WORKER_JOB_BATCH_SIZE: envInt(1, 100).default(5),
   WORKER_POLL_INTERVAL_MS: envInt(100, 300_000).default(2_000),
@@ -99,6 +130,7 @@ export function loadDatabaseEnv(
 export const envSchemas = {
   base: baseSchema,
   database: databaseSchema,
+  telegram: telegramSchema,
   web: webSchema,
   worker: workerSchema,
 } as const;
