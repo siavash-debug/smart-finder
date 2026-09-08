@@ -7,8 +7,11 @@
 export {
   BrowserManager,
   CircuitBreaker,
+  createCloudflareCdpLaunch,
+  createLocalChromiumLaunch,
   navigateSafely,
   type BrowserManagerOptions,
+  type CloudflareCdpConfig,
 } from "./browser.js";
 export { computeContentHash } from "./content-hash.js";
 export { HARD_STOP_CATEGORIES, IngestionError, type IngestionErrorCategory } from "./errors.js";

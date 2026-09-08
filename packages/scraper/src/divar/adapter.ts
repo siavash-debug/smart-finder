@@ -33,8 +33,56 @@ import { IngestionError } from "../errors.js";
 
 export const DIVAR_SOURCE_SLUG = "divar";
 
+/**
+ * Divar sometimes wraps the Apartment/Product JSON-LD object (the one carrying `url`,
+ * `floorSize`, and the free-text listing `description`) in a single-element array, sometimes
+ * not — both real, confirmed shapes for the same kind of block on different listings (e.g.
+ * `https://divar.ir/v/gaYq3kUB`, array-wrapped, vs the Phase 5 `gaSebQzv` fixture, a bare
+ * object). Checking only the bare-object shape silently missed every array-wrapped listing's
+ * `description` — and its `url`, from the same object — which is why `description` had been
+ * unreachable since Phase 5, not a hydration timing issue (verified: the description is present
+ * in the very first `domcontentloaded` DOM, inside a `<script type="application/ld+json">` tag
+ * — JSON-LD is embedded server-rendered markup, not client-hydrated).
+ *
+ * Kept as a standalone, pure, exported function — not inlined into `extractRawDetailPage` below
+ * — specifically so it's unit-testable without a browser: `extractRawDetailPage` runs inside
+ * Playwright's `page.evaluate` (serialized to the browser, cannot reference any outer-scope
+ * function), so this logic couldn't be called from there even if it were more convenient to
+ * inline. It only ever sees the raw `<script>` tag text contents, which `extractRawDetailPage`
+ * collects with a single cheap DOM read.
+ */
+export function parseJsonLdBlocks(rawJsonLdTexts: readonly string[]): {
+  canonicalUrl: string | null;
+  description: string | null;
+} {
+  let canonicalUrl: string | null = null;
+  let description: string | null = null;
+
+  for (const text of rawJsonLdTexts) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue; // Malformed JSON-LD is untrusted third-party content — skip, never throw.
+    }
+    const candidates = Array.isArray(parsed) ? parsed : [parsed];
+    for (const candidate of candidates) {
+      if (candidate === null || typeof candidate !== "object") continue;
+      const data = candidate as Record<string, unknown>;
+      if (typeof data.url === "string" && data.url.includes("/v/")) canonicalUrl = data.url;
+      if (typeof data.floorSize === "object" && typeof data.description === "string") {
+        description = data.description;
+      }
+    }
+  }
+
+  return { canonicalUrl, description };
+}
+
 /** Runs entirely inside the page's own JS context (Playwright serializes this function to the
- *  browser) — cannot reference any outer-scope variable, only DOM APIs. */
+ *  browser) — cannot reference any outer-scope variable, only DOM APIs. JSON-LD blocks are
+ *  collected as raw text here (a plain DOM read) and parsed outside the browser by
+ *  `parseJsonLdBlocks` — see that function's doc comment for why. */
 function extractRawDetailPage(selectors: {
   titleSelector: string;
   jsonLdSelector: string;
@@ -46,28 +94,17 @@ function extractRawDetailPage(selectors: {
   groupRowValueCellSelector: string;
   bodyTextSelector: string;
 }): {
-  canonicalUrl: string | null;
   title: string | null;
-  jsonLdDescription: string | null;
+  jsonLdTexts: string[];
   infoRows: Record<string, string>;
   groupRow: { headers: string[]; values: string[] } | null;
   bodyText: string;
 } {
   const title = document.querySelector(selectors.titleSelector)?.textContent?.trim() ?? null;
 
-  let canonicalUrl: string | null = null;
-  let jsonLdDescription: string | null = null;
-  for (const script of document.querySelectorAll(selectors.jsonLdSelector)) {
-    try {
-      const data = JSON.parse(script.textContent ?? "null") as Record<string, unknown>;
-      if (typeof data.url === "string" && data.url.includes("/v/")) canonicalUrl = data.url;
-      if (typeof data.floorSize === "object" && typeof data.description === "string") {
-        jsonLdDescription = data.description;
-      }
-    } catch {
-      // Malformed JSON-LD is untrusted third-party content — skip this block, never throw.
-    }
-  }
+  const jsonLdTexts = Array.from(document.querySelectorAll(selectors.jsonLdSelector)).map(
+    (script) => script.textContent ?? "",
+  );
 
   const infoRows: Record<string, string> = {};
   for (const row of document.querySelectorAll(selectors.infoRowSelector)) {
@@ -92,7 +129,7 @@ function extractRawDetailPage(selectors: {
 
   const bodyText = document.querySelector(selectors.bodyTextSelector)?.textContent ?? "";
 
-  return { canonicalUrl, title, jsonLdDescription, infoRows, groupRow, bodyText };
+  return { title, jsonLdTexts, infoRows, groupRow, bodyText };
 }
 
 export class DivarAdapter implements SourceAdapter<RawDivarDetailPage, ParsedDivarFields> {
@@ -130,11 +167,45 @@ export class DivarAdapter implements SourceAdapter<RawDivarDetailPage, ParsedDiv
 
     // Same client-side-render timing as `discover` — the structured fields (group row table,
     // info rows) aren't in the DOM yet right after `domcontentloaded`. The title is the
-    // earliest-rendering element, so it's the wait target; a genuinely missing title still
+    // earliest-rendering element, so it's waited for first; a genuinely missing title still
     // lets extraction proceed and come back mostly empty rather than erroring out.
     await page
       .waitForSelector(TITLE_SELECTOR, { timeout: this.navigationTimeoutMs })
       .catch(() => undefined);
+
+    // A real Docker-collector run (documented in ADR-0019) showed area/rooms/building-age
+    // (the group-row table) hydrating reliably while price/floor (the `unexpandable-info-row`
+    // rows) intermittently had not yet — the title alone is not a sufficient readiness signal
+    // for that second region. Waiting on the actual selector the price/floor extraction reads
+    // from is a real, meaningful DOM condition, not a blind timeout.
+    //
+    // ADR-0021 investigated this further with repeated live measurements against real, fixed
+    // listing URLs: the SAME listing, freshly navigated, resolved this exact selector in ~50ms
+    // on one attempt and still hadn't after a full 20s (sometimes 45s+) on the next attempt —
+    // proof this is genuine upstream response-time variance in Divar's own price/floor
+    // data-loading, not a fixed hydration-order bug a smarter selector or a longer single wait
+    // can reliably out-wait (a 58-second continuous wait was observed to still fail in one
+    // trial). What the same investigation found DID help: a *fresh, independent* page load —
+    // not a longer wait on the same one — succeeds where the original stalled, most likely
+    // because Divar's backend/CDN makes an independent routing/caching decision per request. So
+    // the fix here is a single bounded retry via reload, not a longer timeout: two independent,
+    // shorter attempts, each on their own fresh network request, with the same combined worst
+    // case as before — never an open-ended wait, and a listing with genuinely no info-rows
+    // still proceeds (both attempts correctly find nothing and move on, no false success).
+    const infoRowWaitMs = Math.round(this.navigationTimeoutMs / 2);
+    const firstAttempt = await page
+      .waitForSelector(INFO_ROW_SELECTOR, { timeout: infoRowWaitMs })
+      .then(() => true)
+      .catch(() => false);
+
+    if (!firstAttempt) {
+      await page
+        .reload({ waitUntil: "domcontentloaded", timeout: infoRowWaitMs })
+        .catch(() => undefined);
+      await page
+        .waitForSelector(INFO_ROW_SELECTOR, { timeout: infoRowWaitMs })
+        .catch(() => undefined);
+    }
 
     const extracted = await page.evaluate(extractRawDetailPage, {
       titleSelector: TITLE_SELECTOR,
@@ -148,7 +219,15 @@ export class DivarAdapter implements SourceAdapter<RawDivarDetailPage, ParsedDiv
       bodyTextSelector: BODY_TEXT_SELECTOR,
     });
 
-    return { requestedUrl: listing.url, ...extracted };
+    const { jsonLdTexts, ...rest } = extracted;
+    const { canonicalUrl, description } = parseJsonLdBlocks(jsonLdTexts);
+
+    return {
+      requestedUrl: listing.url,
+      ...rest,
+      canonicalUrl,
+      jsonLdDescription: description,
+    };
   }
 
   parse(raw: RawDivarDetailPage): ParsedDivarFields {

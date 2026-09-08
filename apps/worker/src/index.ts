@@ -11,7 +11,12 @@
  */
 
 import { checkDatabaseHealth, closePool, createPool } from "@smart-finder/database";
-import { BrowserManager, DivarAdapter } from "@smart-finder/scraper";
+import {
+  BrowserManager,
+  createCloudflareCdpLaunch,
+  createLocalChromiumLaunch,
+  DivarAdapter,
+} from "@smart-finder/scraper";
 import { createLogger, loadWorkerEnv, type ComponentHealth } from "@smart-finder/shared";
 
 import { createCollectDivarHandler, COLLECT_DIVAR_JOB_TYPE } from "./divar-collection-handler.js";
@@ -43,7 +48,37 @@ async function main(): Promise<void> {
 
   const pool = createPool({ env, logger, applicationName: "smart-finder-worker" });
   const telegramClient = createWorkerTelegramClient(env);
-  const browserManager = new BrowserManager({ navigationTimeoutMs: DIVAR_NAVIGATION_TIMEOUT_MS });
+  // Browser execution strategy is opt-in via env, in priority order:
+  //   1. Cloudflare Browser Rendering (both CLOUDFLARE_BROWSER_RENDERING_* set)
+  //   2. Local Chromium, e.g. the Docker collector (PLAYWRIGHT_CHROMIUM_SANDBOX=false)
+  //   3. BrowserManager's own default local launch (host dev/CI — unchanged since Phase 5)
+  // Cloudflare knowledge stays isolated to createCloudflareCdpLaunch; this worker only ever
+  // picks which launch function to hand BrowserManager. See docs/DECISIONS.md.
+  const cloudflareCdp =
+    env.CLOUDFLARE_BROWSER_RENDERING_ACCOUNT_ID !== undefined &&
+    env.CLOUDFLARE_BROWSER_RENDERING_API_TOKEN !== undefined
+      ? createCloudflareCdpLaunch({
+          accountId: env.CLOUDFLARE_BROWSER_RENDERING_ACCOUNT_ID,
+          apiToken: env.CLOUDFLARE_BROWSER_RENDERING_API_TOKEN,
+        })
+      : undefined;
+  const browserLaunch =
+    cloudflareCdp ??
+    (env.PLAYWRIGHT_CHROMIUM_SANDBOX
+      ? undefined
+      : createLocalChromiumLaunch({ chromiumSandbox: false }));
+  logger.info("browser execution strategy resolved", {
+    status:
+      cloudflareCdp !== undefined
+        ? "cloudflare_cdp"
+        : browserLaunch !== undefined
+          ? "local_no_sandbox"
+          : "local_default",
+  });
+  const browserManager = new BrowserManager({
+    navigationTimeoutMs: DIVAR_NAVIGATION_TIMEOUT_MS,
+    ...(browserLaunch !== undefined ? { launch: browserLaunch } : {}),
+  });
   const divarAdapter = new DivarAdapter(DIVAR_NAVIGATION_TIMEOUT_MS);
 
   const JOB_HANDLERS: JobHandlerRegistry = {

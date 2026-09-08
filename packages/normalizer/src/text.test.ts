@@ -47,6 +47,12 @@ describe("normalizeText", () => {
     expect(normalizeText(`${lrm}test`)).toBe("test");
   });
 
+  it("strips combining Arabic diacritics so اجارهٔ and اجاره normalize identically (real Divar label variation)", () => {
+    const withHamza = "اجارهٔ ماهانه"; // اجارهٔ ماهانه — combining hamza above (U+0654)
+    expect(normalizeText(withHamza)).toBe(normalizeText("اجاره ماهانه"));
+    expect(normalizeText(withHamza)).toBe("اجاره ماهانه");
+  });
+
   it("trims leading and trailing whitespace", () => {
     expect(normalizeText("  سلام  ")).toBe("سلام");
   });

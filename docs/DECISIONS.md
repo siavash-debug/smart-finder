@@ -535,3 +535,285 @@ types.ts`) is the discover/fetch/parse/normalize contract a second source would 
   precondition means a source's stale postings are not yet ever automatically delisted —
   explicitly future work, not a regression from any prior phase (Phase 5 introduces the table
   it would apply to).
+
+## ADR-0017 — Divar ingestion's browser runtime: Cloudflare Browser Rendering via Playwright's `connectOverCDP`, not `@cloudflare/puppeteer`
+
+- **Date:** 2026-09-08
+- **Status:** Accepted
+- **Context:** `apps/worker` was planned to move to a low-cost hosting target where a
+  persistent Node.js process with a locally-installed Chromium is impractical/costly (see the
+  Phase 6 hosting research). Cloudflare Browser Rendering offers a hosted, Free-tier-eligible
+  headless Chromium. An isolated spike (`spikes/cloudflare-browser-rendering/`, not part of the
+  build) first proved, against the real Phase 5 fixture URL (`https://divar.ir/v/gaSebQzv`),
+  that Browser Rendering can drive the exact selectors/extraction `DivarAdapter` already uses.
+- **Rejected approach — `@cloudflare/puppeteer`:** its `launch()`/`connect()`/`acquire()` all
+  require a `BrowserWorker` argument (`{fetch: typeof fetch}`), a Cloudflare Workers **binding**
+  object only constructible inside an actual Workers execution context (confirmed by reading
+  the installed package's source, not assumed from its docs). `apps/worker` is a plain,
+  persistent Node.js process and was explicitly not going to be converted into a Cloudflare
+  Worker — so this package cannot be used from it at all, regardless of how much of the adapter
+  were rewritten around it.
+- **Decision:** Cloudflare separately exposes Browser Rendering over the plain Chrome DevTools
+  Protocol, documented as connectable "from any environment... your local machine, or a cloud
+  environment," authenticated by a bearer API token — not a Workers binding. Playwright's own
+  `chromium.connectOverCDP(endpointURL, { headers })` speaks this directly; the installed
+  version (1.63.0) was confirmed (via its own `.d.ts`) to support a `headers` option, and the
+  path was verified experimentally against the real Cloudflare account and the real Divar
+  fixture before being wired in (see the Stage 2 live smoke test below). `packages/scraper/src/
+browser.ts` gains one new exported function, `createCloudflareCdpLaunch(config)`, building a
+  `BrowserManagerOptions.launch` function around this — `BrowserManager` itself, `DivarAdapter`,
+  selectors, parsing, and normalization are **unchanged**. `@cloudflare/puppeteer` is not a
+  dependency of this repository.
+- **Decision (opt-in, not implicit):** `apps/worker` launches a local Chromium by default,
+  exactly as Phase 5 always did — unchanged behavior for local dev, CI, and every existing test.
+  Cloudflare Browser Rendering is used only when both `CLOUDFLARE_BROWSER_RENDERING_ACCOUNT_ID`
+  and `CLOUDFLARE_BROWSER_RENDERING_API_TOKEN` are set (validated together, `packages/shared/
+src/env.ts`); a real production deployment sets both, a local `.env` normally sets neither.
+- **Decision (concurrency/reuse, unchanged design):** `BrowserManager` already lazily launches
+  once (`browserPromise ??= this.launchFn()`) and serves every `withPage()` call — including
+  concurrent ones from `apps/worker`'s `job-dispatcher.ts`, which runs claimed jobs concurrently
+  via `Promise.all` — a new page per call, never a shared page. This was already correct for
+  local Chromium and needed no change for the CDP-connected case; a concurrency test
+  (`browser.test.ts`, "launches exactly once when multiple withPage calls race concurrently")
+  proves concurrent `withPage()` callers collapse onto one in-flight launch/connect rather than
+  each triggering their own — the property that keeps this design within Browser Rendering's
+  free-tier "3 concurrent browsers per account" and "~1 new browser instance per 20 seconds"
+  limits (the second discovered experimentally during the earlier spike, not assumed).
+- **Verified facts vs. documented limits vs. assumptions:** Experimentally verified today:
+  `connectOverCDP` + `headers` works against the real endpoint; the real Divar fixture's title/
+  area/rooms/floor extract identically through the CDP path as through local Playwright.
+  Cloudflare-documented (not independently re-verified every run): the 10-minute/day Free
+  browser-time budget, the 3-concurrent-browser limit, the ~20-second new-instance rate limit.
+  Assumption, not yet tested: behavior when the free daily budget is actually exhausted
+  mid-collection-run (expected: Cloudflare returns a 429-style error, which `navigateSafely`/
+  `BrowserManager` would currently surface as an ordinary `BROWSER_ERROR` — not a hard-stop
+  category — meaning a job would fail and retry per the existing job-queue backoff rather than
+  correctly recognizing "budget exhausted, don't retry until tomorrow"; this refinement is
+  explicitly deferred, not silently solved here).
+- **Consequences:** Multiple concurrent `apps/worker` **replicas** (not concurrent jobs within
+  one process — that case is handled, see above) would each hold their own CDP connection,
+  counting separately against the account-wide 3-concurrent-browser limit; single-replica
+  operation (today's actual deployment shape) stays well within it. `match.tier`,
+  `TransactionType`/`PropertyType`, the Postgres job/retry/idempotency model, and every package
+  outside `packages/scraper/src/browser.ts` are untouched by this decision.
+
+## ADR-0018 — Divar ingestion's primary browser runtime reverts to a local, Dockerized Chromium; Cloudflare CDP stays as a selectable, isolated backend
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** ADR-0017 made Cloudflare Browser Rendering the browser backend. In practice its
+  Free-tier daily budget was exhausted by cumulative testing within a single day, blocking a
+  planned real collection run with no way to proceed except waiting for a UTC reset or
+  upgrading the plan — neither acceptable for the immediate goal of proving the ingestion
+  pipeline end-to-end against real Neon data. The requirement changed: the primary path must be
+  runnable locally/on a VPS without depending on Cloudflare's shared, rate-limited budget, while
+  keeping the already-verified CDP path available and selectable, not deleted.
+- **Decision (runtime):** `infrastructure/docker/Dockerfile.worker` now builds a
+  Playwright-capable image and installs a real Chromium via `playwright install --with-deps
+chromium` at build time. Base image is `node:24-bookworm-slim` (Debian/glibc), not Alpine —
+  Alpine/musl is not a supported target for Playwright's downloaded browser binaries. Cloudflare
+  publishes a pre-built image with Chromium baked in (`mcr.microsoft.com/playwright`), not used
+  here because that registry was unreachable from this build environment; Docker Hub's plain
+  Node image plus an explicit `playwright install` produces the same effective result and pins
+  automatically to whatever `playwright` version `packages/scraper/package.json` declares.
+- **Decision (root/sandbox):** The container runs as root (no non-root user switch), because
+  Chromium's sandbox needs a specific non-root user/permission setup — the kind Playwright's own
+  pre-built image configures — that isn't replicated by simply switching to a plain non-root
+  user. `packages/scraper/src/browser.ts` gains one new exported function,
+  `createLocalChromiumLaunch({chromiumSandbox})`, alongside `createCloudflareCdpLaunch` from
+  ADR-0017; `chromiumSandbox: false` is a standard Playwright launch option controlling only the
+  container security model, not a stealth/evasion technique — it has no effect on what Divar
+  observes. A new env var, `PLAYWRIGHT_CHROMIUM_SANDBOX` (default `true`, unset everywhere except
+  the Docker collector), selects it. `BrowserManager` itself did not change.
+- **Decision (selection order, `apps/worker/src/index.ts`):** Cloudflare CDP (both
+  `CLOUDFLARE_BROWSER_RENDERING_*` set) → local Chromium with sandbox disabled
+  (`PLAYWRIGHT_CHROMIUM_SANDBOX=false`) → `BrowserManager`'s own default local launch (host
+  dev/CI, unchanged since Phase 5). All three are mutually exclusive and explicit; nothing
+  silently falls back from one to another mid-run — verified by making the unused paths throw
+  during a real Docker run (see the corresponding session record) and by the container's own
+  startup log (`"status":"local_no_sandbox"`).
+- **Decision (which process runs in the container):** The real `apps/worker` entry point,
+  unmodified — not a separate scraper microservice. It already depended on
+  `@smart-finder/scraper` and wired `BrowserManager`/`DivarAdapter` before this change; the
+  Dockerfile was simply missing `packages/normalizer`, `packages/telegram`, and
+  `packages/scraper` in its COPY/build steps (written before Phase 5 added the scraper package)
+  and is now corrected to include them, using a `tsc --build` invocation scoped to exactly what
+  `apps/worker/tsconfig.build.json` references — not the root `build:packages` script, which
+  also targets `packages/matching`, a package this image doesn't need and doesn't copy in.
+- **Verified (real, not assumed):** A real Docker build succeeded; a real bounded
+  `collect_divar` job (`https://divar.ir/s/tehran/buy-apartment`, one real Neon `job` row) ran
+  to completion inside the container against the real Neon database, discovering, persisting,
+  and versioning real Divar postings with zero failures — recorded in this session, not
+  reproduced here. `packages/database`'s existing migrations were applied to Neon unmodified;
+  no schema change was needed for this decision.
+- **Consequences:** Local/VPS Docker is the primary, always-available path; Cloudflare CDP
+  remains a fully wired, tested, selectable alternative (ADR-0017) for whenever a
+  non-Docker-hosted deployment target is chosen, without code changes beyond setting env vars.
+  `docker-compose.yml`'s general local-dev stack is untouched — this Dockerfile change is
+  exercised directly (`docker build`/`docker run`) for the Neon-backed verification run,
+  documented separately from the compose file's own local-Postgres-by-default convenience path.
+
+## ADR-0019 — Semantic, resilient Divar info-row classification; a real second rent price UI discovered
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** A real sale collection persisted 0/8 prices because `parse.ts` hardcoded the
+  rent-only label "ودیعه" as the sole price source. Investigating the fix properly (not just
+  patching in a second hardcoded label) surfaced the deeper, correctly-anticipated risk: Divar's
+  labels vary in ways that don't change meaning — confirmed for real, "اجارهٔ ماهانه" (with a
+  combining Arabic hamza above the heh, U+0654) vs "اجاره ماهانه" (without it) are the same
+  field. Exact-string label matching is the wrong foundation for this regardless of how many
+  labels get added to a list.
+- **Decision (normalizer fix):** `packages/normalizer/src/text.ts`'s `normalizeText` now also
+  strips Arabic combining diacritics (U+064B-U+065F, U+0670) — the same class of fix as
+  ADR-0016's RLM/LRM strip, extended to cover this newly-observed real case. Regression test
+  added confirming `اجارهٔ` and `اجاره` normalize identically.
+- **Decision (semantic classification layer):** New file, `packages/scraper/src/divar/
+semantic-fields.ts`. `classifyInfoRowLabel` normalizes a label then matches it against an
+  ordered list of keyword-based category matchers (`deposit`, `monthlyRent`,
+  `rentConvertibility`, `saleTotalPrice`, `salePricePerSqm`, `floor`) — most-specific first
+  (`rentConvertibility`, which itself contains "ودیعه", is checked before plain `deposit`). A
+  label matching nothing returns `null`; `classifyInfoRows` groups a full `infoRows` object by
+  category and preserves every unmatched row under `unknown` rather than discarding it.
+  `parse.ts` now sources `priceRaw` from `deposit ?? saleTotalPrice`, and carries
+  `monthlyRentRaw`/`rentConvertibilityRaw`/`salePricePerSqmRaw` through as new `ParsedDivarFields`
+  members — recognized, never discarded, but **not yet normalized into a domain field** (see
+  the schema-gap decision below). `قیمت هر متر` (`salePricePerSqm`) is a structurally separate
+  category from `saleTotalPrice` and never feeds `priceRaw` — verified by a dedicated test using
+  the user-provided real example values (۲۱,۲۰۰,۰۰۰,۰۰۰ vs ۳۰۲,۸۵۷,۰۰۰ تومان).
+- **Decision (hydration/readiness — real DOM synchronization, not a longer sleep):** The real
+  Docker-collector run that found the sale-price bug also showed `floor`/price null far more
+  often than `area`/`rooms`/`buildingAge`, correlated almost perfectly (15/16 postings null on
+  both together, 1/16 with both populated). `DivarAdapter.fetch` waited only on the title
+  selector before extracting; the group-row table (area/rooms/age) apparently hydrates first,
+  the `unexpandable-info-row` region (price/floor) sometimes slightly after. Fixed by adding a
+  second, real `page.waitForSelector(INFO_ROW_SELECTOR, ...)` wait after the title wait — a
+  meaningful DOM readiness condition (React commits that region's rows together; once one
+  exists, they all do), not a blind timeout increase. Still never a hard failure: a listing with
+  genuinely no info-rows proceeds regardless, same as before.
+- **Discovered, out of scope, reported rather than silently solved (real, live finding):**
+  Inspecting several real current listings on `https://divar.ir/s/tehran/rent-residential`
+  found that **most currently show rent pricing through a completely different DOM structure**
+  — an interactive convertible deposit/rent slider ("ودیعه و اجارهٔ این ملک قابل تبدیل است" —
+  "this property's deposit and rent are convertible"), with **no `unexpandable-info-row`
+  elements for price at all**; the slider's rendered text is a _range_ ("۶۰۰ میلیون" /
+  "۴۰۰ میلیون" for deposit, "۳ میلیون" / "۱۰ میلیون" for rent — min/max, not a single value).
+  The fixed, non-convertible `unexpandable-info-row` pattern this phase's fix targets (ودیعه/
+  اجارهٔ ماهانه/ودیعه و اجاره → غیر قابل تبدیل) is still real and current — confirmed on a live
+  listing (`gafqTUo8`) matching the exact fields this phase was asked to support — but appears
+  to be the less common case on `rent-residential` right now, not the majority one. Parsing the
+  slider requires new selectors and a genuinely different extraction strategy (a value _range_,
+  which `priceToman: bigint`, a scalar, cannot represent without a schema decision of its own) —
+  a materially larger, separate problem from label-wording resilience, not attempted here.
+- **Decision (schema gap, not a schema change):** `NormalizedListingFields`/the `posting` table
+  have exactly one price slot, `priceToman`. Divar exposes up to four distinct real numbers
+  (rent deposit, rent monthly amount, sale total price, sale price-per-square-meter), plus now a
+  convertible-range concept with no scalar representation at all. Per this phase's explicit
+  instruction, no schema migration was made. `monthlyRentRaw`/`rentConvertibilityRaw`/
+  `salePricePerSqmRaw` are parsed and preserved at the `ParsedDivarFields` layer so the
+  information is not lost, but `normalize.ts` does not yet turn them into stored columns —
+  documented here as a future domain-model enhancement (new nullable columns, e.g.
+  `deposit_toman`/`monthly_rent_toman`/`price_per_sqm_toman`, plus a decision on how or whether
+  to represent a convertible range), not implemented in this step.
+- **Unresolved, flagged rather than silently worked around:** `divar-collection-handler.ts`'s
+  `isSupportedListingContext` still rejects any job payload with `transactionType: "rent"`
+  outright (ADR-0016's explicit, MASTER_PROMPT-driven "rent stays structure-only" boundary,
+  unchanged and not touched here) — a real rent `collect_divar` job cannot be enqueued and
+  persisted through the actual pipeline right now, regardless of how correct the rent-parsing
+  logic is. This phase's rent verification is therefore necessarily limited to deterministic
+  tests and direct live-DOM inspection (both real, both reported above), not an end-to-end
+  Neon-persisted rent collection run — that would require either lifting the boundary or
+  building a parse-only verification path, neither of which was authorized in this step.
+
+## ADR-0020 — Description was lost to an array-vs-object JSON-LD shape assumption, not hydration
+
+- **Date:** 2026-09-07
+- **Status:** Accepted
+- **Context:** A real listing (`https://divar.ir/v/gaYq3kUB`) has a genuine, non-empty Persian
+  description, but every persisted posting had `description = null`. Investigated the full
+  pipeline rather than assuming a cause, per instruction.
+- **Root cause (confirmed, not a hydration issue):** the Apartment/Product JSON-LD block
+  carrying `url`/`floorSize`/`description` is embedded server-rendered markup, present in the
+  very first `domcontentloaded` DOM — verified directly against the real listing. The bug was in
+  `extractRawDetailPage`'s parsing: Divar sometimes wraps that object in a single-element array
+  (`[{...}]`), sometimes leaves it bare (`{...}`) — confirmed both shapes real, on different
+  listings. The old code only checked `typeof data.floorSize === "object"` on the parsed value
+  directly; against an array, `data.floorSize` is `undefined` (arrays have no such property), so
+  the check silently failed. This affected `canonicalUrl` from the same object too, not only
+  `description` — both come from the same block. Re-examining the original Phase 5 spike data
+  confirms this bug existed from the start; it was not introduced by any later phase.
+- **Decision (fix, and made testable in the process):** the JSON-LD parsing logic — previously
+  inlined inside `extractRawDetailPage`, which runs inside `page.evaluate` and therefore cannot
+  reference any outer-scope function — is now a standalone, pure, exported function,
+  `parseJsonLdBlocks(rawJsonLdTexts: string[])`, unit-testable without a browser.
+  `extractRawDetailPage` now only does the (cheap, real) DOM read of each `<script
+type="application/ld+json">` tag's raw text; `DivarAdapter.fetch` calls `parseJsonLdBlocks` on
+  that text outside the browser context. The function normalizes both the array-wrapped and
+  bare-object shape into the same candidate loop, so either is handled identically.
+  `description` is carried through completely raw — no trimming/cleaning/summarizing, multiline
+  formatting preserved exactly — matching this phase's explicit instruction that it remain
+  available as free-form source text for later phases (AI extraction, amenities, matching
+  explanations), not a semantically-parsed field.
+- **Verified real, not just fixture-tested:** the exact real `gaYq3kUB` description text is used
+  as a fixture in `adapter.test.ts`'s `parseJsonLdBlocks` tests, alongside a bare-object
+  regression case (the original `gaSebQzv` shape, proving no regression), a real bounded Docker
+  collection against both `buy-residential` and `rent-residential`, and direct Neon verification
+  (see this phase's session record for exact counts).
+- **Consequences:** `RawDivarDetailPage`'s public shape (`canonicalUrl`, `jsonLdDescription`,
+  etc.) is unchanged — this was purely an internal extraction-path fix, not a schema or
+  domain-model change. `parse.ts`/`normalize.ts` needed no changes at all: `description` was
+  already wired correctly end-to-end from `ParsedDivarFields` through to the `posting.description`
+  column; it was simply never populated with a real value to carry.
+
+## ADR-0021 — Sale price/floor extraction: the timing race is genuine upstream variance, not a fixable hydration-order bug
+
+- **Date:** 2026-09-08
+- **Status:** Accepted
+- **Context:** Real Docker-collector runs showed `price_toman`/`floor` intermittently missing on
+  SALE listings even with `waitForSelector(INFO_ROW_SELECTOR)` already in place (ADR-0019).
+  Investigated with repeated, controlled live measurements against fixed, real listing URLs
+  before writing any fix, per instruction not to assume the prior diagnosis still held.
+- **Finding (the prior diagnosis was incomplete, confirmed by direct repeated measurement):**
+  the same real listing, freshly navigated, resolved `[data-testid="unexpandable-info-row"]` in
+  ~50ms on one attempt and had still not resolved it after a full 20s — sometimes 45s+ — on the
+  very next fresh attempt. One trial left the page open for 58 continuous seconds and the
+  selector still never matched, even though the same price/floor text was fully present in
+  `document.body.innerText` well before that. This rules out "wrong selector" and "hydration
+  ordering" as the root cause: the DOM structure and selector are correct (confirmed via direct
+  ancestry inspection — `[data-testid="unexpandable-info-row"]` is genuinely present once the
+  data has loaded); the actual variable is upstream — how long Divar's own client takes to fetch
+  and render this specific data block, which varies enormously and unpredictably run to run for
+  the identical URL.
+- **Finding (what actually changes the odds):** a longer continuous wait on the same page load
+  does not reliably help (the 58-second trial above disproves it), but a **fresh, independent
+  page load** (`page.reload()`) sometimes succeeds where the original stalled — most plausibly
+  because Divar's backend/CDN makes an independent routing/caching decision per request rather
+  than the client-side JS being stuck in an infinite/long-running wait. Verified end-to-end
+  against `DivarAdapter.fetch` on 5 real listings: 3 succeeded (one on the first attempt, at
+  least one after the reload), 2 still failed even after both attempts — an honest, materially
+  improved but not perfect result, consistent with the finding being real upstream variance
+  rather than a deterministic bug with a deterministic fix.
+- **Decision:** `DivarAdapter.fetch`'s info-row wait is now two bounded attempts, each on an
+  independent page load: `waitForSelector(INFO_ROW_SELECTOR, {timeout: T/2})`, and only if that
+  fails, one `page.reload()` followed by a second `waitForSelector(..., {timeout: T/2})`. Total
+  worst-case wait is unchanged from before (`T`, the existing `navigationTimeoutMs` budget) —
+  this is explicitly not "wait longer," which was tested and does not reliably help; it is two
+  independent, shorter, real attempts instead of one long one. A listing with genuinely no
+  info-rows still proceeds correctly (both attempts correctly find nothing, extraction continues
+  with `null` fields, exactly as before) — this fix cannot and does not distinguish "still
+  loading" from "genuinely absent," because no client-observable DOM signal can make that
+  distinction when the data simply never arrives within any bounded window.
+- **Rejected alternatives:** a single longer timeout (explicitly disallowed by instruction, and
+  disproven by the 58-second trial regardless); racing `waitForSelector` against a
+  `waitForFunction` on `body.innerText` (tested; results were inconsistent/inconclusive across
+  repeated trials — no evidence it outperforms the selector-based wait, so not adopted without
+  proof); an unbounded retry loop (violates the bounded-wait requirement and risks materially
+  slowing every collection run for a benefit that isn't guaranteed).
+- **Consequences — stated honestly, not hidden:** this materially improves reliability but does
+  **not** guarantee deterministic extraction on every listing; a small residual failure rate is
+  an accepted, understood property of Divar's own response-time distribution for this specific
+  data block, not a defect in this codebase. A future phase could explore a bounded number of
+  additional reload attempts (diminishing returns, and each attempt adds real wall-clock time to
+  every collection run) or server-side signals (none currently exposed) — not pursued here, out
+  of this step's explicit scope. `BrowserManager`, `semantic-fields.ts`'s classification logic,
+  and raw `description` extraction (ADR-0020) are all unmodified by this change.

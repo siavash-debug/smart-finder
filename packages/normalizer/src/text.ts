@@ -45,6 +45,17 @@ const CHAR_MAP: readonly (readonly [RegExp, string])[] = [
 const ZERO_WIDTH = new RegExp("[\\u200B\\u200C\\u200D\\u200E\\u200F\\uFEFF]", "g");
 
 /**
+ * Arabic combining diacritics (harakat/tanween/hamza-above/hamza-below/sukun/shadda,
+ * U+064B-U+065F, plus superscript alef U+0670): optional pronunciation marks that do not
+ * change a word's identity. Real Divar text has been observed with and without them on the
+ * same word — e.g. "اجارهٔ ماهانه" (with a combining hamza above the heh, U+0654) vs "اجاره
+ * ماهانه" (without it) both meaning "monthly rent". Unlike the precomposed heh-with-hamza
+ * variants (`ۀ`/`ە`, already folded by CHAR_MAP below), this is a *combining* mark attached to
+ * a separate base letter, so it needs its own strip rather than a substitution.
+ */
+const ARABIC_DIACRITICS = new RegExp("[\\u064B-\\u065F\\u0670]", "g");
+
+/**
  * Punctuation Divar text uses interchangeably with Latin ASCII equivalents. Fixed-width vs.
  * spelled-out Persian isn't touched — only characters that mean the same thing regardless of
  * script are unified, so no information is lost.
@@ -80,6 +91,7 @@ export function normalizeText(input: string): string {
   let out = input.normalize("NFC");
 
   out = out.replace(ZERO_WIDTH, "");
+  out = out.replace(ARABIC_DIACRITICS, "");
   for (const [pattern, replacement] of CHAR_MAP) out = out.replace(pattern, replacement);
   for (const [pattern, replacement] of PUNCTUATION_MAP) out = out.replace(pattern, replacement);
 

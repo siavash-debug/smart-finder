@@ -71,16 +71,37 @@ const webSchema = baseSchema.extend({
   APP_URL: z.url().default("http://localhost:3000"),
 });
 
-const workerSchema = baseSchema.extend({
-  ...databaseSchema.shape,
-  // The worker only ever sends messages (never verifies an inbound webhook), so it needs the
-  // bot token but not the webhook secret.
-  TELEGRAM_BOT_TOKEN: telegramBotToken,
-  WORKER_HEALTH_PORT: envInt(1, 65_535).default(3001),
-  WORKER_JOB_BATCH_SIZE: envInt(1, 100).default(5),
-  WORKER_POLL_INTERVAL_MS: envInt(100, 300_000).default(2_000),
-  WORKER_SHUTDOWN_TIMEOUT_MS: envInt(0, 300_000).default(15_000),
-});
+const workerSchema = baseSchema
+  .extend({
+    ...databaseSchema.shape,
+    // The worker only ever sends messages (never verifies an inbound webhook), so it needs the
+    // bot token but not the webhook secret.
+    TELEGRAM_BOT_TOKEN: telegramBotToken,
+    WORKER_HEALTH_PORT: envInt(1, 65_535).default(3001),
+    WORKER_JOB_BATCH_SIZE: envInt(1, 100).default(5),
+    WORKER_POLL_INTERVAL_MS: envInt(100, 300_000).default(2_000),
+    WORKER_SHUTDOWN_TIMEOUT_MS: envInt(0, 300_000).default(15_000),
+    // Both optional: when unset, the worker launches a local Chromium (today's Phase 5
+    // behavior — the default for local dev and CI). When both are set, DivarAdapter's browser
+    // runs against Cloudflare Browser Rendering's real CDP endpoint instead — an explicit,
+    // configurable production path, never an implicit requirement for a local test run.
+    CLOUDFLARE_BROWSER_RENDERING_ACCOUNT_ID: z.string().min(1).optional(),
+    CLOUDFLARE_BROWSER_RENDERING_API_TOKEN: z.string().min(1).optional(),
+    // Docker-only: Chromium refuses its own sandbox when run as root without the specific
+    // non-root user/permission setup Playwright's pre-built image configures. Not a
+    // stealth/evasion setting — unset (the default) everywhere except the Docker collector.
+    PLAYWRIGHT_CHROMIUM_SANDBOX: envBoolean.default(true),
+  })
+  .refine(
+    (value) =>
+      (value.CLOUDFLARE_BROWSER_RENDERING_ACCOUNT_ID === undefined) ===
+      (value.CLOUDFLARE_BROWSER_RENDERING_API_TOKEN === undefined),
+    {
+      message:
+        "CLOUDFLARE_BROWSER_RENDERING_ACCOUNT_ID and CLOUDFLARE_BROWSER_RENDERING_API_TOKEN must be set together or not at all",
+      path: ["CLOUDFLARE_BROWSER_RENDERING_ACCOUNT_ID"],
+    },
+  );
 
 export type BaseEnv = z.infer<typeof baseSchema>;
 export type DatabaseEnv = z.infer<typeof databaseSchema>;

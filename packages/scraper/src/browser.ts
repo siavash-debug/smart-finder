@@ -15,7 +15,9 @@ import { chromium, type Browser, type Page } from "playwright";
 import { IngestionError } from "./errors.js";
 
 export interface BrowserManagerOptions {
-  /** Injectable so tests never launch a real browser. */
+  /** Injectable so tests never launch a real browser. Defaults to a local `chromium.launch()`;
+   *  pass `createCloudflareCdpLaunch(...)`'s result here to run against Cloudflare Browser
+   *  Rendering instead — `BrowserManager` itself has no Cloudflare-specific knowledge. */
   launch?: () => Promise<Browser>;
   navigationTimeoutMs?: number;
 }
@@ -26,6 +28,68 @@ const DEFAULT_NAVIGATION_TIMEOUT_MS = 30_000;
  *  live `curl -I` against divar.ir during the Phase 5 access spike) — used only to *recognize*
  *  a CAPTCHA challenge and hard-stop, never to solve or bypass one. */
 const CAPTCHA_MARKERS = ["arcaptcha", "captcha"];
+
+/**
+ * Builds a `BrowserManagerOptions.launch` function for a local Chromium — the same thing
+ * `BrowserManager`'s own default does, exposed here only so callers that need to pass
+ * `chromiumSandbox: false` don't have to duplicate the `chromium.launch({headless:true})` call.
+ *
+ * `chromiumSandbox: false` is a standard Playwright option (not a stealth/evasion technique —
+ * it has no effect on how a scraped site perceives the browser) needed when Chromium runs as
+ * root inside a container without the specific non-root user/permission setup Playwright's own
+ * pre-built Docker image configures for its sandbox to work. Every existing call site (host
+ * dev, CI, tests) keeps using `BrowserManager`'s own default (`chromiumSandbox` unset, i.e.
+ * Playwright's normal sandboxed default) — this is opt-in, for the Docker collector only.
+ */
+export function createLocalChromiumLaunch(
+  options: { chromiumSandbox?: boolean } = {},
+): () => Promise<Browser> {
+  return () =>
+    chromium.launch({
+      headless: true,
+      ...(options.chromiumSandbox !== undefined
+        ? { chromiumSandbox: options.chromiumSandbox }
+        : {}),
+    });
+}
+
+export interface CloudflareCdpConfig {
+  accountId: string;
+  apiToken: string;
+  /** Milliseconds Cloudflare keeps the remote session alive with no activity before closing it
+   *  (10_000-600_000; Cloudflare's own default is 60_000). Kept generous by default here since a
+   *  collection run legitimately pauses between listings for parse/normalize/persist work that
+   *  doesn't touch the browser. */
+  keepAliveMs?: number;
+}
+
+const DEFAULT_CDP_KEEP_ALIVE_MS = 600_000;
+
+/**
+ * Builds a `BrowserManagerOptions.launch` function that connects to Cloudflare Browser
+ * Rendering's real CDP endpoint over the network, instead of launching a local Chromium
+ * process — the only Cloudflare-specific code in this package (ADR-0017: the
+ * browser/runtime layer changes, `DivarAdapter` and everything above it does not).
+ *
+ * Uses Playwright's own `chromium.connectOverCDP`, not `@cloudflare/puppeteer` — that package's
+ * `launch()`/`connect()` require a Cloudflare Workers `browser` binding (a `{fetch: typeof
+ * fetch}` object only constructible inside an actual Workers execution context) and cannot run
+ * in a plain Node.js process such as `apps/worker`. Cloudflare's CDP endpoint is a separate,
+ * documented, network-reachable-from-anywhere interface authenticated by a bearer API token —
+ * verified experimentally against the real Cloudflare account and the real Divar fixture URL
+ * during this migration's Stage 2 (see docs/DECISIONS.md).
+ */
+export function createCloudflareCdpLaunch(config: CloudflareCdpConfig): () => Promise<Browser> {
+  const keepAliveMs = config.keepAliveMs ?? DEFAULT_CDP_KEEP_ALIVE_MS;
+  const endpoint =
+    `wss://api.cloudflare.com/client/v4/accounts/${config.accountId}` +
+    `/browser-rendering/devtools/browser?keep_alive=${keepAliveMs.toString()}`;
+
+  return () =>
+    chromium.connectOverCDP(endpoint, {
+      headers: { Authorization: `Bearer ${config.apiToken}` },
+    });
+}
 
 export class BrowserManager {
   private browserPromise: Promise<Browser> | null = null;

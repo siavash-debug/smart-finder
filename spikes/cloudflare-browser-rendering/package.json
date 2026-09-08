@@ -1,0 +1,18 @@
+{
+  "name": "cloudflare-browser-rendering-spike",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Isolated, throwaway spike — NOT part of the smart-finder workspace or production build graph. Proves/disproves whether Cloudflare Browser Rendering can open a real Divar page and extract the same fields the Phase 5 Playwright DivarAdapter extracts. See README.md.",
+  "type": "module",
+  "scripts": {
+    "dev:remote": "wrangler dev --remote",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/puppeteer": "^1.0.2",
+    "@cloudflare/workers-types": "^5.0.0",
+    "wrangler": "^4.0.0",
+    "typescript": "5.9.3"
+  }
+}

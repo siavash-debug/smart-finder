@@ -12,6 +12,8 @@ export default tseslint.config(
       "**/.next/**",
       "**/coverage/**",
       "**/*.tsbuildinfo",
+      // Isolated, temporary architecture spikes — never part of the production lint graph.
+      "spikes/**",
     ],
   },
 

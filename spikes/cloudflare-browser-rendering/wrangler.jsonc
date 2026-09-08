@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "smart-finder-browser-rendering-spike",
+  "main": "src/index.ts",
+  // A safely-past compatibility date (the sandbox's simulated clock reported a date the real
+  // Cloudflare API rejected as "in the future" — using a known-safe past date instead).
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "browser": {
+    "binding": "BROWSER"
+  }
+}

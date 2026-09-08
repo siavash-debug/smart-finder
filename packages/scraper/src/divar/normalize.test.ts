@@ -29,6 +29,27 @@ function normalizeFixture(raw: RawDivarDetailPage) {
 }
 
 describe("normalizeDivarFields", () => {
+  it("carries a non-empty real description through untouched — raw source text, not run through any semantic parser", () => {
+    const result = normalizeFixture(REAL_LISTING);
+    expect(result.description).toBe("اجاره ۱۱۰ متر | ۲ خواب | صراف‌های جنوبی");
+  });
+
+  it("preserves a multiline description's newlines exactly, for both sale and rent contexts", () => {
+    const multiline = "خط اول\nخط دوم\n\nخط چهارم";
+    const raw: RawDivarDetailPage = { ...REAL_LISTING, jsonLdDescription: multiline };
+    const parsed = parseDivarDetailPage(raw);
+    if (parsed === null) throw new Error("fixture must parse");
+
+    const rentResult = normalizeDivarFields(parsed, RENT_CONTEXT, REFERENCE_DATE);
+    const saleResult = normalizeDivarFields(
+      parsed,
+      { transactionType: "sale", propertyType: "apartment" },
+      REFERENCE_DATE,
+    );
+    expect(rentResult.description).toBe(multiline);
+    expect(saleResult.description).toBe(multiline);
+  });
+
   it("parses the real listing's price via parseMoney, RLM mark and all", () => {
     const result = normalizeFixture(REAL_LISTING);
     expect(result.priceToman).toBe(4_100_000_000n);

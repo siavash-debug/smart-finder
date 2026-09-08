@@ -1,18 +1,30 @@
-# Worker image — the ingest plane.
+# Worker image — the ingest plane. Runs the real `apps/worker` process unmodified, including
+# packages/scraper's Playwright/Chromium-based Divar collector (BrowserManager/DivarAdapter).
 # Build context is the repository root: docker build -f infrastructure/docker/Dockerfile.worker .
-
-FROM node:24-alpine AS base
+#
+# Base image: plain Debian (glibc), not Alpine — Alpine/musl is not a supported target for
+# Playwright's downloaded browser binaries, so this is not a style choice, it's what actually
+# runs Chromium reliably. `playwright install --with-deps chromium` below installs both the
+# Chromium build and every OS-level package it needs, version-matched to whatever `playwright`
+# version packages/scraper/package.json declares — no separate version to keep in sync by hand.
+# (Playwright also publishes a ready-made image with this baked in, mcr.microsoft.com/
+# playwright; not used here because that registry is unreachable from this build environment —
+# Docker Hub is used for the base image instead, with the same effective result.)
+FROM node:24-bookworm-slim AS base
 WORKDIR /app
 # Signals reach PID 1 correctly through tini, so SIGTERM triggers the graceful drain in
 # apps/worker/src/index.ts instead of an abrupt kill.
-RUN apk add --no-cache tini
+RUN apt-get update && apt-get install -y --no-install-recommends tini && rm -rf /var/lib/apt/lists/*
 
 # ── dependencies ─────────────────────────────────────────────────────────────
 # Only the manifests are copied first so this layer caches until a dependency changes.
 FROM base AS deps
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/normalizer/package.json ./packages/normalizer/
 COPY packages/database/package.json ./packages/database/
+COPY packages/telegram/package.json ./packages/telegram/
+COPY packages/scraper/package.json ./packages/scraper/
 COPY apps/worker/package.json ./apps/worker/
 RUN npm ci
 
@@ -20,9 +32,15 @@ RUN npm ci
 FROM deps AS build
 COPY tsconfig.base.json tsconfig.json ./
 COPY packages/shared ./packages/shared
+COPY packages/normalizer ./packages/normalizer
 COPY packages/database ./packages/database
+COPY packages/telegram ./packages/telegram
+COPY packages/scraper ./packages/scraper
 COPY apps/worker ./apps/worker
-RUN npm run build:packages
+# Scoped to exactly what apps/worker/tsconfig.build.json references — the root `build:packages`
+# script also builds packages/matching, which apps/worker doesn't depend on and which isn't
+# copied into this image.
+RUN npx tsc --build packages/shared/tsconfig.build.json packages/normalizer/tsconfig.build.json packages/database/tsconfig.build.json packages/telegram/tsconfig.build.json packages/scraper/tsconfig.build.json apps/worker/tsconfig.build.json
 
 # ── runtime ──────────────────────────────────────────────────────────────────
 FROM base AS runtime
@@ -30,21 +48,34 @@ ENV NODE_ENV=production
 
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json ./packages/shared/
+COPY packages/normalizer/package.json ./packages/normalizer/
 COPY packages/database/package.json ./packages/database/
+COPY packages/telegram/package.json ./packages/telegram/
+COPY packages/scraper/package.json ./packages/scraper/
 COPY apps/worker/package.json ./apps/worker/
 RUN npm ci --omit=dev && npm cache clean --force
+# --with-deps installs both the Chromium build and the OS packages it needs (apt), matched to
+# the `playwright` version resolved by the npm ci above.
+RUN npx playwright install --with-deps chromium
 
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist
+COPY --from=build /app/packages/normalizer/dist ./packages/normalizer/dist
 COPY --from=build /app/packages/database/dist ./packages/database/dist
 # Migration SQL is read from disk at runtime by the migrate CLI.
 COPY packages/database/migrations ./packages/database/migrations
+COPY --from=build /app/packages/telegram/dist ./packages/telegram/dist
+COPY --from=build /app/packages/scraper/dist ./packages/scraper/dist
 COPY --from=build /app/apps/worker/dist ./apps/worker/dist
 
-USER node
+# Runs as root (the base image's default). Chromium's own sandbox needs a specific non-root
+# user/permission setup (the kind Playwright's official pre-built image configures) to run as
+# a non-root user; without replicating that exactly, dropping to a plain non-root user here
+# would just break the sandbox a different way. `PLAYWRIGHT_CHROMIUM_SANDBOX=false` (see
+# .env.example) is what actually makes Chromium launchable in this container — not the user id.
 EXPOSE 3001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.WORKER_HEALTH_PORT||3001)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "apps/worker/dist/index.js"]

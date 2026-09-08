@@ -1,7 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
+import type * as Playwright from "playwright";
 import type { Browser, Page } from "playwright";
 
-import { BrowserManager, CircuitBreaker, navigateSafely } from "./browser.js";
+vi.mock("playwright", async () => {
+  const actual = await vi.importActual<typeof Playwright>("playwright");
+  return {
+    ...actual,
+    chromium: { ...actual.chromium, connectOverCDP: vi.fn(), launch: vi.fn() },
+  };
+});
+
+import { chromium } from "playwright";
+
+import {
+  BrowserManager,
+  CircuitBreaker,
+  createCloudflareCdpLaunch,
+  createLocalChromiumLaunch,
+  navigateSafely,
+} from "./browser.js";
 import { IngestionError } from "./errors.js";
 
 function fakePage(overrides: Partial<Page> = {}): Page {
@@ -106,6 +123,47 @@ describe("BrowserManager", () => {
     await manager.close();
   });
 
+  it("launches exactly once when multiple withPage calls race concurrently (concurrent job dispatch)", async () => {
+    // Mirrors apps/worker's real shape: job-dispatcher.ts's processClaimedJobs runs claimed jobs
+    // concurrently via Promise.all, and every collect_divar job shares the one BrowserManager
+    // instance constructed in apps/worker/src/index.ts. This proves getBrowser()'s
+    // `browserPromise ??= this.launchFn()` correctly collapses concurrent racers onto the same
+    // in-flight launch — never launching (or CDP-connecting) more than once — and that each
+    // concurrent caller still gets its own page, never sharing one page across jobs.
+    let resolveLaunch!: (browser: Browser) => void;
+    const launch = vi.fn(
+      () =>
+        new Promise<Browser>((resolve) => {
+          resolveLaunch = resolve;
+        }),
+    );
+    const newPageCalls: Page[] = [];
+    const fakeBrowser = {
+      newPage: vi.fn(() => {
+        const page = fakePage();
+        newPageCalls.push(page);
+        return Promise.resolve(page);
+      }),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Browser;
+    const manager = new BrowserManager({ launch });
+
+    const concurrentCalls = [
+      manager.withPage(() => Promise.resolve("a")),
+      manager.withPage(() => Promise.resolve("b")),
+      manager.withPage(() => Promise.resolve("c")),
+    ];
+    // All three have already called getBrowser() and are awaiting the same in-flight promise
+    // before the launch resolves — this is the race the test exists to prove is handled safely.
+    resolveLaunch(fakeBrowser);
+    const results = await Promise.all(concurrentCalls);
+
+    expect(launch).toHaveBeenCalledTimes(1);
+    expect(results).toEqual(["a", "b", "c"]);
+    expect(newPageCalls).toHaveLength(3); // one distinct page per concurrent job, never shared
+    await manager.close();
+  });
+
   it("always closes the page, even when the callback throws", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const launch = vi.fn().mockResolvedValue({
@@ -122,6 +180,71 @@ describe("BrowserManager", () => {
   it("wraps a launch failure as a BROWSER_ERROR IngestionError", async () => {
     const launch = vi.fn().mockRejectedValue(new Error("no chromium binary"));
     const manager = new BrowserManager({ launch: launch as () => Promise<Browser> });
+
+    await expect(manager.withPage(() => Promise.resolve(undefined))).rejects.toMatchObject({
+      category: "BROWSER_ERROR",
+    });
+  });
+});
+
+describe("createLocalChromiumLaunch", () => {
+  it("launches headless chromium with no chromiumSandbox key when unspecified", async () => {
+    const fakeBrowser = { close: vi.fn() } as unknown as Browser;
+    vi.mocked(chromium.launch).mockResolvedValue(fakeBrowser);
+
+    const launch = createLocalChromiumLaunch();
+    const result = await launch();
+
+    expect(result).toBe(fakeBrowser);
+    expect(chromium.launch).toHaveBeenCalledWith({ headless: true });
+  });
+
+  it("passes chromiumSandbox: false through for the Docker collector", async () => {
+    vi.mocked(chromium.launch).mockResolvedValue({} as Browser);
+
+    const launch = createLocalChromiumLaunch({ chromiumSandbox: false });
+    await launch();
+
+    expect(chromium.launch).toHaveBeenCalledWith({ headless: true, chromiumSandbox: false });
+  });
+});
+
+describe("createCloudflareCdpLaunch", () => {
+  it("connects via chromium.connectOverCDP with the account's wss endpoint and a bearer token", async () => {
+    const fakeBrowser = { close: vi.fn() } as unknown as Browser;
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(fakeBrowser);
+
+    const launch = createCloudflareCdpLaunch({ accountId: "acct123", apiToken: "tok456" });
+    const result = await launch();
+
+    expect(result).toBe(fakeBrowser);
+    expect(chromium.connectOverCDP).toHaveBeenCalledWith(
+      "wss://api.cloudflare.com/client/v4/accounts/acct123/browser-rendering/devtools/browser?keep_alive=600000",
+      { headers: { Authorization: "Bearer tok456" } },
+    );
+  });
+
+  it("honors a custom keepAliveMs instead of the default", async () => {
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue({} as Browser);
+
+    const launch = createCloudflareCdpLaunch({
+      accountId: "acct123",
+      apiToken: "tok456",
+      keepAliveMs: 30_000,
+    });
+    await launch();
+
+    expect(chromium.connectOverCDP).toHaveBeenCalledWith(
+      expect.stringContaining("keep_alive=30000"),
+      expect.anything(),
+    );
+  });
+
+  it("propagates a connection failure so BrowserManager wraps it as BROWSER_ERROR", async () => {
+    vi.mocked(chromium.connectOverCDP).mockRejectedValue(new Error("401 Unauthorized"));
+
+    const launch = createCloudflareCdpLaunch({ accountId: "acct123", apiToken: "bad-token" });
+    const manager = new BrowserManager({ launch });
 
     await expect(manager.withPage(() => Promise.resolve(undefined))).rejects.toMatchObject({
       category: "BROWSER_ERROR",
